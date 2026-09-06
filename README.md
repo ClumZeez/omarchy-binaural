@@ -90,7 +90,7 @@ writes these itself.
 
 ```bash
 omarchy-shell binaural status
-omarchy-shell binaural play alpha     # tones only (beds unchanged)
+omarchy-shell binaural beat alpha     # tones only (beds unchanged)
 omarchy-shell binaural stop           # stop tones + noise + rain
 omarchy-shell binaural toggle         # mute all / restore (same as bar right-click)
 omarchy-shell binaural noise          # toggle noise

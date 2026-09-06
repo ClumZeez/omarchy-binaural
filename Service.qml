@@ -422,7 +422,7 @@ Item {
     target: "binaural"
 
     function status(): string { return root.statusJson() }
-    function play(id: string): string { root.play(id); return root.statusJson() }
+    function beat(id: string): string { root.play(id); return root.statusJson() }
     function stop(): string { root.stop(); return root.statusJson() }
     function toggle(): string { root.toggle(); return root.statusJson() }
     function noise(value: string): string {
