@@ -2,3 +2,4 @@
 *.jsc
 .DS_Store
 RELOAD_CHECK.txt
+__pycache__/

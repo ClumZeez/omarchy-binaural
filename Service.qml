@@ -39,8 +39,6 @@ Item {
   property real rainVolume: 1
   property bool hydrated: false
   property int rainUrlIndex: 0
-  // stream list gen — bump when URLs change so shells reload
-  readonly property int rainStreamGen: 2
   property bool rainNeedsRespawn: true
   // mpv volume (0–100+) at rain scrub 100%. Edit this to change rain loudness.
   readonly property real rainVolumeMax: 80
@@ -328,18 +326,7 @@ Item {
     onTriggered: root.persist()
   }
 
-  Timer {
-    id: rainVolumeTimer
-    interval: 50
-    repeat: false
-    onTriggered: root.applyRainVolume()
-  }
-
   Component.onCompleted: hydrate()
-
-  Process {
-    id: rainIpcProc
-  }
 
   Process {
     id: rainPlayer

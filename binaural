@@ -5,7 +5,6 @@ Left ear is the carrier, right ear is carrier + beat. Headphones required.
 Stdin commands (live mode):
 
     NOISE on|off
-    RAIN on|off
     TONES on|off
     PRESET <beat-hz>
     VOLUME <0-1 or 0-100>   # binaural tones only
@@ -81,30 +80,6 @@ class Brown:
         self.y = (self.y + white) * 0.996
         return self.y * 0.035
 
-
-class Rain:
-    """Procedural rain: band-limited wash plus sparse droplet transients.
-
-    Generated, not sampled — no recording, no licence.
-    """
-
-    __slots__ = ("hp", "lp", "drop")
-
-    def __init__(self) -> None:
-        self.hp = 0.0
-        self.lp = 0.0
-        self.drop = 0.0
-
-    def tick(self, white: float, unit: float) -> float:
-        # Highpass then gentle lowpass → the hiss of a shower, not white.
-        self.hp = 0.985 * self.hp + white
-        band = white - self.hp
-        self.lp += 0.22 * (band - self.lp)
-        # ~10 drops/sec at 48 kHz; exponential decay for the impact.
-        if unit < 0.00022:
-            self.drop = 0.45 + 0.55 * unit / 0.00022
-        self.drop *= 0.987
-        return self.lp * 0.28 + self.drop * abs(white) * 0.4
 
 
 def clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -184,8 +159,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--beat", type=float, default=10.0)
     parser.add_argument("--noise", dest="noise", action="store_true", default=True)
     parser.add_argument("--no-noise", dest="noise", action="store_false")
-    parser.add_argument("--rain", dest="rain", action="store_true", default=False)
-    parser.add_argument("--no-rain", dest="rain", action="store_false")
     parser.add_argument("--tones", dest="tones", action="store_true", default=True)
     parser.add_argument("--no-tones", dest="tones", action="store_false")
     parser.add_argument("--duration", type=float, default=0.0,
@@ -197,14 +170,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 class Engine:
-    def __init__(self, carrier: float, beat: float, noise: bool, seed: int, rain: bool = False, tones: bool = True) -> None:
+    def __init__(self, carrier: float, beat: float, noise: bool, seed: int, tones: bool = True) -> None:
         self.carrier = float(carrier)
         self.beat = float(beat)
         self.noise_wanted = 1.0 if noise else 0.0
-        self.rain_wanted = 1.0 if rain else 0.0
         self.tones_wanted = 1.0 if tones else 0.0
         self.noise_gain = 0.0
-        self.rain_gain = 0.0
         self.tone_gain = 0.0
         self.volume_wanted = 1.0
         self.volume_gain = 1.0
@@ -215,8 +186,6 @@ class Engine:
         self.phase_r = 0.0
         self.brown_l = Brown()
         self.brown_r = Brown()
-        self.rain_l = Rain()
-        self.rain_r = Rain()
         self.frame = 0
         self.stopping = False
         self.fade_out_from: int | None = None
@@ -237,8 +206,6 @@ class Engine:
     def set_noise(self, on: bool) -> None:
         self.noise_wanted = 1.0 if on else 0.0
 
-    def set_rain(self, on: bool) -> None:
-        self.rain_wanted = 1.0 if on else 0.0
 
     def set_tones(self, on: bool) -> None:
         self.tones_wanted = 1.0 if on else 0.0
@@ -277,20 +244,13 @@ class Engine:
         rng = self.rng.uniform
         brown_l = self.brown_l.tick
         brown_r = self.brown_r.tick
-        rain_l = self.rain_l.tick
-        rain_r = self.rain_r.tick
         fade_out_frames = max(1, int(TONE_FADE_OUT_SEC * RATE))
-        unit = lambda: (rng() + 1.0) * 0.5
 
         for _ in range(frames):
             if self.noise_gain < self.noise_wanted:
                 self.noise_gain = min(self.noise_wanted, self.noise_gain + noise_step)
             elif self.noise_gain > self.noise_wanted:
                 self.noise_gain = max(self.noise_wanted, self.noise_gain - noise_step)
-            if self.rain_gain < self.rain_wanted:
-                self.rain_gain = min(self.rain_wanted, self.rain_gain + noise_step)
-            elif self.rain_gain > self.rain_wanted:
-                self.rain_gain = max(self.rain_wanted, self.rain_gain - noise_step)
             if self.tone_gain < self.tones_wanted:
                 self.tone_gain = min(self.tones_wanted, self.tone_gain + tone_up)
             elif self.tone_gain > self.tones_wanted:
@@ -324,10 +284,6 @@ class Engine:
                 gain = NOISE_AMP * self.noise_gain * self.noise_vol_gain
                 left += brown_l(rng()) * gain
                 right += brown_r(rng()) * gain
-            if self.rain_gain > 0.0001:
-                gain = NOISE_AMP * 1.15 * self.rain_gain
-                left += rain_l(rng(), unit()) * gain
-                right += rain_r(rng(), unit()) * gain
 
             left = math.tanh(left * env)
             right = math.tanh(right * env)
@@ -362,8 +318,6 @@ def apply_command(engine: Engine, line: str) -> None:
     if op == "NOISE" and len(parts) >= 2:
         engine.set_noise(parts[1].lower() not in ("0", "off", "false", "no"))
         return
-    if op == "RAIN" and len(parts) >= 2:
-        engine.set_rain(parts[1].lower() not in ("0", "off", "false", "no"))
         return
     if op == "TONES" and len(parts) >= 2:
         engine.set_tones(parts[1].lower() not in ("0", "off", "false", "no"))
@@ -506,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.carrier <= 0 or args.beat <= 0:
         sys.stderr.write("binaural: carrier and beat must be positive\n")
         return 2
-    engine = Engine(args.carrier, args.beat, args.noise, args.seed, rain=args.rain, tones=args.tones)
+    engine = Engine(args.carrier, args.beat, args.noise, args.seed, tones=args.tones)
     if args.raw or os.getenv("BINAURAL_RAW") == "1":
         try:
             return run_raw(engine, args.duration, sys.stdout.buffer)
