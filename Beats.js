@@ -102,6 +102,7 @@ function config(entry) {
     volume: clampVolume(e.volume, DEFAULT_VOLUME),
     noiseVolume: clampVolume(e.noiseVolume, DEFAULT_VOLUME),
     rainVolume: clampVolume(e.rainVolume, DEFAULT_VOLUME),
+    masterVolume: clampVolume(e.masterVolume, DEFAULT_VOLUME),
     carrier: CARRIER_HZ
   }
 }

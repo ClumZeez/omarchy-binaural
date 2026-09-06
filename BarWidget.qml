@@ -8,9 +8,8 @@ import "Beats.js" as Beats
 // Bar face of binaural beats. The engine lives in Service.qml
 // (one per shell); this widget is one per monitor and only renders + relays.
 //
-//   left click    popup with the six presets and the noise-floor icon
+//   left click    popup with the six presets and bed controls
 //   right click   master mute / restore (tones + noise + rain)
-//   middle click  toggle the brown-noise floor
 BarWidget {
   id: root
   moduleName: "callum.binaural"
@@ -180,8 +179,8 @@ BarWidget {
 
     onPressed: function(b) {
       if (!root.ready) return
+      if (b === Qt.MiddleButton) return
       if (b === Qt.RightButton) root.beats.toggle()
-      else if (b === Qt.MiddleButton) root.beats.toggleNoise()
       else root.togglePanel()
     }
 

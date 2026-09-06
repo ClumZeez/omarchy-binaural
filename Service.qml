@@ -37,6 +37,7 @@ Item {
   property real volume: 1
   property real noiseVolume: 1
   property real rainVolume: 1
+  property real masterVolume: 1
   property bool hydrated: false
   property bool rainNeedsRespawn: true
   // mpv volume (0–100+) at rain scrub 100%. Edit this to change rain loudness.
@@ -67,6 +68,7 @@ Item {
     current.volume = volume
     current.noiseVolume = noiseVolume
     current.rainVolume = rainVolume
+    current.masterVolume = masterVolume
     if (shell && typeof shell.updateEntryInline === "function")
       shell.updateEntryInline(pluginId, current)
   }
@@ -84,6 +86,7 @@ Item {
     volume = config.volume
     noiseVolume = config.noiseVolume
     rainVolume = config.rainVolume
+    masterVolume = config.masterVolume
     ensureGenerator()
     // Warm mpv paused so the first rain toggle is an IPC unpause, not a spawn.
     warmRain()
@@ -162,8 +165,15 @@ Item {
   }
 
   function stop() {
-    // IPC / tones-only stop. Master mute is toggle().
-    stopTones()
+    // Hard stop: all three off. Does not snapshot for right-click restore.
+    muted = false
+    snapPlaying = false
+    snapNoise = false
+    snapRain = false
+    playing = false
+    applyNoiseLive(false)
+    applyRainLive(false)
+    tell("TONES off\n")
   }
 
   function muteAll() {
@@ -221,10 +231,18 @@ Item {
     rainJson(["set_property", "pause", !!paused])
   }
 
+  function toneGain() {
+    return Math.max(0, Math.min(1, volume * masterVolume))
+  }
+
+  function noiseGain() {
+    return Math.max(0, Math.min(1, noiseVolume * masterVolume))
+  }
+
   function rainVolumeValue() {
-    // Rain scrub is independent of the oscilloscope / binaural volume.
-    // mpv softvol is cubic — invert so 20% scrub ≈ 0.2× amplitude like noise.
-    var t = Math.max(0, Math.min(1, rainVolume))
+    // Per-bed scrub × master. mpv softvol is cubic — invert so equal %
+    // keeps relative loudness vs linear noise.
+    var t = Math.max(0, Math.min(1, rainVolume * masterVolume))
     if (t <= 0)
       return 0
     return Math.round(rainVolumeMax * Math.pow(t, 1.0 / 3.0))
@@ -235,13 +253,28 @@ Item {
     rainJson(["set_property", "volume", rainVolumeValue()])
   }
 
+  function applyAllVolumes() {
+    tell("VOLUME " + toneGain() + "\n")
+    tell("NOISEVOL " + noiseGain() + "\n")
+    applyRainVolume()
+  }
+
+  // Oscilloscope: tones only (still scaled by masterVolume).
   function setVolume(value) {
     var next = Beats.clampVolume(value, volume)
     if (Math.abs(next - volume) < 0.001) return
     volume = next
     schedulePersist()
-    // Oscilloscope scrub: binaural beat only — do not touch rain/noise beds.
-    tell("VOLUME " + volume + "\n")
+    tell("VOLUME " + toneGain() + "\n")
+  }
+
+  // IPC volume: master gain over tones + noise + rain.
+  function setMasterVolume(value) {
+    var next = Beats.clampVolume(value, masterVolume)
+    if (Math.abs(next - masterVolume) < 0.001) return
+    masterVolume = next
+    schedulePersist()
+    applyAllVolumes()
   }
 
   function setNoiseVolume(value) {
@@ -249,7 +282,7 @@ Item {
     if (Math.abs(next - noiseVolume) >= 0.001) {
       noiseVolume = next
       schedulePersist()
-      tell("NOISEVOL " + noiseVolume + "\n")
+      tell("NOISEVOL " + noiseGain() + "\n")
     }
     // 0% disables the bed; any audible level arms it.
     if (next <= 0.001) {
@@ -335,6 +368,7 @@ Item {
       volume: Math.round(volume * 100),
       noiseVolume: Math.round(noiseVolume * 100),
       rainVolume: Math.round(rainVolume * 100),
+      masterVolume: Math.round(masterVolume * 100),
       headphones: true
     })
   }
@@ -370,8 +404,8 @@ Item {
     id: player
     stdinEnabled: true
     onStarted: {
-      player.write("VOLUME " + root.volume + "\n")
-      player.write("NOISEVOL " + root.noiseVolume + "\n")
+      player.write("VOLUME " + root.toneGain() + "\n")
+      player.write("NOISEVOL " + root.noiseGain() + "\n")
       player.write("NOISE " + (root.noiseLive ? "on" : "off") + "\n")
       if (root.playing) {
         var p = Beats.resolvePreset(root.presetId)
@@ -405,9 +439,10 @@ Item {
       else root.toggleRain()
       return root.statusJson()
     }
+    // Master gain over tones + noise + rain (per-bed levels stay as set in the UI).
     function volume(value: string): string {
       if (value !== undefined && value !== null && String(value).length)
-        root.setVolume(value)
+        root.setMasterVolume(value)
       return root.statusJson()
     }
   }

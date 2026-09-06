@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "callum.binaural",
   "name": "Binaural",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "author": "Callum Lees",
   "license": "MIT",
   "description": "Six binaural-beat presets in the Omarchy bar, with optional brown-noise and local Moodist rain beds. Gateway-range carrier, headphones on.",
