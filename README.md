@@ -5,8 +5,7 @@
 A minimal binaural beat suite, including options for brown noise or rain sounds with independent level controls.
 
 Headphones are required: a binaural beat is the difference between the two
-ears. The carrier is **110 Hz** (Gateway / Hemi-Sync range) and is not a
-control.
+ears. The carrier is **110 Hz**.
 
 ## Presets
 
@@ -19,13 +18,10 @@ control.
 | Beta | Problem solving | 20 Hz |
 | Gamma | Peak Focus | 40 Hz |
 
-Alpha is the default. The noise floor is on by default.
-
 ## The popup
 
-Preset tiles start or stop **tones only** — rain and noise stay as you left
-them. Noise and rain icons sit on the top-right: click to mute/unmute, drag
-to change volume. Tone volume is the oscilloscope.
+Noise and rain icons sit on the top-right, binaural beat control is the oscilloscope in the middle: 
+click to mute/unmute, drag to change volume.
 
 Brown noise is generated in-process; rain is a local loop of Moodist's
 **Light Rain** sample (see `THIRD_PARTY.md`).
@@ -40,7 +36,7 @@ same mix.
 | Left click | Open / close the popup |
 | Right click | Mute all three / restore previous mix |
 
-While playing, the bar shows the sine pair plus the preset name.
+While playing, the bar shows the beat name.
 
 ## Requirements
 
@@ -73,21 +69,6 @@ omarchy plugin add https://github.com/ClumZeez/omarchy-binaural --enable
 omarchy plugin remove callum.binaural
 ```
 
-## Settings
-
-Inline on the widget's entry in `~/.config/omarchy/shell.json`. The popup
-writes these itself.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `preset` | `alpha` | Last chosen preset id |
-| `noise` | `true` | Brown-noise floor preference |
-| `rain` | `false` | Rain-bed preference |
-| `volume` | `1` | Tone mix (oscilloscope), 0–1 |
-| `noiseVolume` | `1` | Brown-noise level, 0–1 |
-| `rainVolume` | `1` | Rain level, 0–1 |
-| `masterVolume` | `1` | Master gain over all three, 0–1 |
-
 ## IPC
 
 ```bash
@@ -96,11 +77,7 @@ omarchy-shell binaural beat alpha     # tones only (beds unchanged)
 omarchy-shell binaural stop           # stop tones + noise + rain
 omarchy-shell binaural toggle         # mute all / restore (same as bar right-click)
 omarchy-shell binaural noise          # toggle noise
-omarchy-shell binaural noise on
-omarchy-shell binaural noise off
 omarchy-shell binaural rain           # toggle rain
-omarchy-shell binaural rain on
-omarchy-shell binaural rain off
 omarchy-shell binaural volume 0.5     # master gain over tones + noise + rain
 omarchy-shell shell toggle callum.binaural   # open / close the popup
 ```
