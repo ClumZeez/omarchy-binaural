@@ -29,8 +29,8 @@ playing tile (or right-click the bar icon) to silence everything; those
 prefs are kept for the next start.
 
 Grain and rain icons sit on the title row. Hover for the label, click to
-arm a bed. Brown noise is generated in-process; rain is **Sleepscapes Rain**
-(a live mpv stream from stream.willstare.com). Both can be on at once.
+arm a bed. Brown noise is generated in-process; rain is a local loop of
+Moodist's **Light Rain** sample (see `THIRD_PARTY.md`). Both can be on at once.
 
 Tone volume is the oscilloscope (tones only). Noise and rain each have
 their own vertical scrub; icons shrink while scrubbing and disappear at 0%
@@ -50,7 +50,7 @@ While playing, the bar shows the sine pair plus the preset name.
 
 - Omarchy with the Quattro shell (`omarchy-shell`, Quickshell based).
 - `python3` (standard library only) and `pw-play` (PipeWire) or `paplay`.
-- `mpv` for the Sleepscapes rain stream.
+- `mpv` for the local rain loop.
 
 No sudo.
 
@@ -109,7 +109,7 @@ omarchy-shell shell toggle callum.binaural   # open / close the popup
 ## How it works
 
 - `Service.qml` is the engine: one instance per shell, owns the tone
-  generator and the mpv rain player, remembers preset and bed prefs.
+  generator and the local mpv rain loop, remembers preset and bed prefs.
 - `BarWidget.qml` is the bar label and the popup, one per monitor.
 - `SineIcon.qml` tints `assets/SineWave.svg` for the bar and the hero.
 - `NoiseIcon.qml` / `RainIcon.qml` draw canvas marks (size follows volume
@@ -121,6 +121,7 @@ omarchy-shell shell toggle callum.binaural   # open / close the popup
   fade out on stop. Live `PRESET` / `NOISE` / `NOISEVOL` / `VOLUME` /
   `TONES` / `STOP` on stdin.
 - `rain-ipc` talks to mpv over a Unix socket for pause/volume.
+- `assets/light-rain.mp3` is the rain bed (Moodist; see `THIRD_PARTY.md`).
 
 ## License
 

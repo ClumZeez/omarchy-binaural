@@ -6,7 +6,7 @@ import "Beats.js" as Beats
 
 // One generator process for the whole session. Clicks only write stdin
 // (TONES / NOISE / PRESET) so on/off is a short fade, not a process spawn.
-// Rain is a long-lived mpv stream; later toggles pause/unpause over IPC.
+// Rain is a local mpv loop (Moodist light-rain); toggles pause/unpause over IPC.
 Item {
   id: root
 
@@ -38,17 +38,11 @@ Item {
   property real noiseVolume: 1
   property real rainVolume: 1
   property bool hydrated: false
-  property int rainUrlIndex: 0
   property bool rainNeedsRespawn: true
   // mpv volume (0–100+) at rain scrub 100%. Edit this to change rain loudness.
   readonly property real rainVolumeMax: 80
-
-  // Sleepscapes Rain: continuous rain/thunder, no music bed.
-  // Nature Radio Rain is avoided — it occasionally programs ambient tracks.
-  readonly property var rainUrls: [
-    "https://stream.willstare.com:8850/stream/1/",
-    "https://stream.willstare.com:8850/"
-  ]
+  // Moodist light-rain.mp3 — local loop, no stream latency.
+  readonly property string rainFile: sourceDir + "/assets/light-rain.mp3"
 
   readonly property var preset: Beats.resolvePreset(presetId)
   readonly property string presetName: preset ? preset.name : "Binaural"
@@ -85,6 +79,13 @@ Item {
     noiseVolume = config.noiseVolume
     rainVolume = config.rainVolume
     ensureGenerator()
+    // Warm mpv paused so the first rain toggle is an IPC unpause, not a spawn.
+    warmRain()
+  }
+
+  function warmRain() {
+    if (rainPlayer.running) return
+    startRain(true)
   }
 
   function generatorArgs() {
@@ -256,28 +257,32 @@ Item {
     }
   }
 
-  function startRain() {
+  function startRain(paused) {
+    var startPaused = !!paused
     if (rainPlayer.running && !rainNeedsRespawn) {
-      rainIpc(false)
-      applyRainVolume()
+      if (!startPaused) {
+        rainIpc(false)
+        applyRainVolume()
+      }
       return
     }
-    // Respawn so URL / volume-isolation builds actually take effect.
+    // Respawn when the rain asset or mpv flags change.
     rainNeedsRespawn = false
     rainRetry.stop()
     if (rainPlayer.running)
       rainPlayer.running = false
     Quickshell.execDetached(["rm", "-f", rainSock])
-    var url = rainUrls[rainUrlIndex % rainUrls.length]
-    rainPlayer.command = [
+    var cmd = [
       "mpv", "--no-video", "--really-quiet",
+      "--loop-file=inf",
       "--volume=" + String(rainVolumeValue()),
-      "--idle=yes",
       "--input-ipc-server=" + rainSock,
       "--audio-client-name=BinauralRain",
-      "--network-timeout=10",
-      url
+      rainFile
     ]
+    if (startPaused)
+      cmd.splice(3, 0, "--pause")
+    rainPlayer.command = cmd
     rainPlayer.running = true
   }
 
@@ -331,8 +336,9 @@ Item {
   Process {
     id: rainPlayer
     onExited: function() {
+      // Local loop should not exit; if it does, respawn while rain is armed.
       if (root.rainLive) {
-        root.rainUrlIndex = (root.rainUrlIndex + 1) % root.rainUrls.length
+        root.rainNeedsRespawn = true
         rainRetry.restart()
       }
     }
