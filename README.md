@@ -1,6 +1,6 @@
 # Binaural — beats for the Omarchy bar
 
-Six binaural-beat presets plus optional brown-noise and live rain beds.
+Six binaural-beat presets plus optional brown-noise and local rain beds.
 Click the sine in the bar, pick a state, and leave a bed on so the sine
 is not the only thing you hear.
 
@@ -65,10 +65,10 @@ omarchy-restart-shell
 omarchy plugin enable callum.binaural --section center
 ```
 
-From git, once it is published:
+From git:
 
 ```bash
-omarchy plugin add <git-url> --enable
+omarchy plugin add https://github.com/ClumZeez/omarchy-binaural --enable
 ```
 
 ## Remove
