@@ -1,11 +1,8 @@
-# Binaural — beats for the Omarchy bar
+# Binaural-beats for the Omarchy bar
 
-Six binaural-beat presets plus optional brown-noise and local rain beds.
-Click the sine in the bar, pick a state, and leave a bed on so the sine
-is not the only thing you hear.
+Six binaural-beat presets plus optional brown-noise and rain sounds.
 
-The carrier is **110 Hz** — in the 100–200 Hz band Hemi-Sync / the Gateway
-Experience uses — and is not a control. Headphones are required: a binaural
+Headphones are required: a binaural
 beat is the difference between the two ears.
 
 ## Presets
@@ -23,18 +20,12 @@ Alpha is the default. The noise floor is on by default.
 
 ## The popup
 
-A two-by-three grid: name, a word or two for the effect, the beat frequency.
-Click a tile to start or stop that preset's tones only — rain and noise stay
-as you left them. Right-click the bar icon to mute all three; right-click
+Right-click the bar icon to mute all; right-click
 again restores the same mix.
 
-Grain and rain icons sit on the title row. Hover for the label, click to
-arm a bed. Brown noise is generated in-process; rain is a local loop of
-Moodist's **Light Rain** sample (see `THIRD_PARTY.md`). Both can be on at once.
-
-Tone volume is the oscilloscope (tones only). Noise and rain each have
-their own vertical scrub; icons shrink while scrubbing and disappear at 0%
-(which also disables that bed).
+Noise and rain icons sit on top-right. Click to mute/unmute, drag to change volume.
+Brown noise is generated in-process; rain is a local loop of
+Moodist's **Light Rain** sample (see `THIRD_PARTY.md`).
 
 ## Bar widget
 
@@ -42,7 +33,6 @@ their own vertical scrub; icons shrink while scrubbing and disappear at 0%
 |---|---|
 | Left click | Open / close the popup |
 | Right click | Mute all three / restore previous mix |
-| Middle click | Toggle noise |
 
 While playing, the bar shows the sine pair plus the preset name.
 
@@ -77,34 +67,9 @@ omarchy plugin add https://github.com/ClumZeez/omarchy-binaural --enable
 omarchy plugin remove callum.binaural
 ```
 
-## Settings
-
-Inline on the widget's entry in `~/.config/omarchy/shell.json`. The popup
-writes these itself.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `preset` | `alpha` | Last chosen preset id |
-| `noise` | `true` | Brown-noise floor preference |
-| `rain` | `false` | Rain-bed preference |
-| `volume` | `1` | Binaural tone mix, 0–1 |
-| `noiseVolume` | `1` | Brown-noise level, 0–1 |
-| `rainVolume` | `1` | Rain level, 0–1 |
-
 ## IPC
 
-```bash
-omarchy-shell binaural status
-omarchy-shell binaural play alpha
-omarchy-shell binaural stop
-omarchy-shell binaural toggle
-omarchy-shell binaural noise          # toggle
-omarchy-shell binaural noise on
-omarchy-shell binaural noise off
-omarchy-shell binaural rain           # toggle
-omarchy-shell binaural volume 0.5
-omarchy-shell shell toggle callum.binaural   # open / close the popup
-```
+Agent to fill
 
 ## How it works
 
