@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "callum.binaural",
+  "name": "Binaural",
+  "version": "1.4.1",
+  "author": "Callum Lees",
+  "license": "MIT",
+  "description": "Eight binaural-beat presets in the Omarchy bar, with an optional brown-noise floor. Gateway-range carrier, headphones on. [reload-check 2026-09-06 06:45:33 UTC]",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Binaural",
+    "description": "Binaural beats with a brown-noise floor",
+    "category": "Audio",
+    "defaultSection": "center",
+    "allowMultiple": false,
+    "defaults": {
+      "preset": "alpha",
+      "noise": true
+    }
+  }
+}

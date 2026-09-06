@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""Stream stereo binaural beats, with an optional brown-noise floor, to PipeWire.
+
+Left ear is the carrier, right ear is carrier + beat. Headphones required.
+Stdin commands (live mode):
+
+    NOISE on|off
+    RAIN on|off
+    TONES on|off
+    PRESET <beat-hz>
+    VOLUME <0-1 or 0-100>   # binaural tones only
+    NOISEVOL <0-1 or 0-100>
+    STOP
+"""
+
+from __future__ import annotations
+
+import argparse
+import array
+import ctypes
+import fcntl
+import math
+import os
+import queue
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+RATE = 48000
+CHANNELS = 2
+CHUNK = 256
+TWO_PI = 2.0 * math.pi
+# Keep at most this much PCM sitting in the pw-play pipe. Writing as fast
+# as the OS will accept used to queue ~300ms, so NOISE/TONES/PRESET only
+# became audible after that backlog drained.
+LOOKAHEAD_SEC = 0.02
+PIPE_BYTES = 4096
+F_SETPIPE_SZ = getattr(fcntl, "F_SETPIPE_SZ", 1031)
+
+# Gateway / Hemi-Sync carriers live in 100–200 Hz. 110 Hz (A2) is the
+# default; the plugin always passes it explicitly.
+DEFAULT_CARRIER = 110.0
+
+# Tone level is constant whether a bed is on or not — the bed sits
+# underneath, it does not duck the beat.
+TONE_AMP = 0.20
+# Original bed 0.24, then −4 dB, then ×(80/42) to match rainVolumeMax 42→80.
+NOISE_AMP = 0.25 * (10 ** (-4.0 / 20.0)) * (80 / 42)
+TONE_FADE_IN_SEC = 0.04
+TONE_FADE_OUT_SEC = 0.04
+NOISE_RAMP_SEC = 0.05
+VOLUME_RAMP_SEC = 0.03
+# Kept as an alias so existing tests that fade the whole engine still work.
+FADE_OUT_SEC = TONE_FADE_OUT_SEC
+PLAY_VOLUME = "0.5"
+
+
+class LCG:
+    """Fast, portable PRNG. Not cryptographic — we just need noise."""
+
+    def __init__(self, seed: int = 0xC0FFEE) -> None:
+        self.state = seed & 0xFFFFFFFF
+
+    def uniform(self) -> float:
+        self.state = (self.state * 1664525 + 1013904223) & 0xFFFFFFFF
+        return self.state / 4294967295.0 * 2.0 - 1.0
+
+
+class Brown:
+    """Leaky integrator — 1/f² brown noise. Independent instance per ear."""
+
+    __slots__ = ("y",)
+
+    def __init__(self) -> None:
+        self.y = 0.0
+
+    def tick(self, white: float) -> float:
+        self.y = (self.y + white) * 0.996
+        return self.y * 0.035
+
+
+class Rain:
+    """Procedural rain: band-limited wash plus sparse droplet transients.
+
+    Generated, not sampled — no recording, no licence.
+    """
+
+    __slots__ = ("hp", "lp", "drop")
+
+    def __init__(self) -> None:
+        self.hp = 0.0
+        self.lp = 0.0
+        self.drop = 0.0
+
+    def tick(self, white: float, unit: float) -> float:
+        # Highpass then gentle lowpass → the hiss of a shower, not white.
+        self.hp = 0.985 * self.hp + white
+        band = white - self.hp
+        self.lp += 0.22 * (band - self.lp)
+        # ~10 drops/sec at 48 kHz; exponential decay for the impact.
+        if unit < 0.00022:
+            self.drop = 0.45 + 0.55 * unit / 0.00022
+        self.drop *= 0.987
+        return self.lp * 0.28 + self.drop * abs(white) * 0.4
+
+
+def clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    return lo if value < lo else hi if value > hi else value
+
+
+def raised_cosine(t: float) -> float:
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    return 0.5 - 0.5 * math.cos(math.pi * t)
+
+
+def set_pdeathsig() -> None:
+    # Die with the generator if the shell kills it mid-stream (SIGKILL included).
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, signal.SIGTERM)
+    except (OSError, AttributeError):
+        pass
+
+
+def pace(origin: float, emitted: int, now: float, lookahead: float = LOOKAHEAD_SEC) -> tuple[float, float]:
+    """How long to wait so we stay `lookahead` seconds ahead of realtime.
+
+    Returns (sleep_sec, origin). Origin is rewritten if we fell behind, so
+    a hitch does not catch up by bursting and refilling the pipe.
+    """
+    ahead = origin + emitted / RATE - now
+    if ahead > lookahead:
+        return ahead - lookahead, origin
+    if ahead < -0.05:
+        return 0.0, now - emitted / RATE
+    return 0.0, origin
+
+
+def shrink_pipe(fd: int, size: int = PIPE_BYTES) -> None:
+    try:
+        fcntl.fcntl(fd, F_SETPIPE_SZ, size)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def player_command() -> list[str] | None:
+    if shutil.which("pw-play"):
+        return [
+            "pw-play",
+            "--raw",
+            "--format", "s16",
+            "--rate", str(RATE),
+            "--channels", str(CHANNELS),
+            "--volume", PLAY_VOLUME,
+            "--latency", "16ms",
+            "--media-role", "Music",
+            "-P", "media.name=Binaural",
+            "-P", "application.name=Binaural",
+            "-",
+        ]
+    if shutil.which("paplay"):
+        return [
+            "paplay",
+            "--raw",
+            "--format=s16le",
+            f"--rate={RATE}",
+            f"--channels={CHANNELS}",
+            f"--volume={int(float(PLAY_VOLUME) * 65536)}",
+            "--stream-name=Binaural",
+            "--client-name=Binaural",
+        ]
+    return None
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Stream binaural beats.")
+    parser.add_argument("--carrier", type=float, default=DEFAULT_CARRIER)
+    parser.add_argument("--beat", type=float, default=10.0)
+    parser.add_argument("--noise", dest="noise", action="store_true", default=True)
+    parser.add_argument("--no-noise", dest="noise", action="store_false")
+    parser.add_argument("--rain", dest="rain", action="store_true", default=False)
+    parser.add_argument("--no-rain", dest="rain", action="store_false")
+    parser.add_argument("--tones", dest="tones", action="store_true", default=True)
+    parser.add_argument("--no-tones", dest="tones", action="store_false")
+    parser.add_argument("--duration", type=float, default=0.0,
+                        help="Seconds to emit then exit. 0 means run until STOP/SIGTERM.")
+    parser.add_argument("--raw", action="store_true",
+                        help="Write s16le PCM to stdout instead of playing.")
+    parser.add_argument("--seed", type=int, default=0xC0FFEE)
+    return parser.parse_args(argv)
+
+
+class Engine:
+    def __init__(self, carrier: float, beat: float, noise: bool, seed: int, rain: bool = False, tones: bool = True) -> None:
+        self.carrier = float(carrier)
+        self.beat = float(beat)
+        self.noise_wanted = 1.0 if noise else 0.0
+        self.rain_wanted = 1.0 if rain else 0.0
+        self.tones_wanted = 1.0 if tones else 0.0
+        self.noise_gain = 0.0
+        self.rain_gain = 0.0
+        self.tone_gain = 0.0
+        self.volume_wanted = 1.0
+        self.volume_gain = 1.0
+        self.noise_vol_wanted = 1.0
+        self.noise_vol_gain = 1.0
+        self.rng = LCG(seed)
+        self.phase_l = 0.0
+        self.phase_r = 0.0
+        self.brown_l = Brown()
+        self.brown_r = Brown()
+        self.rain_l = Rain()
+        self.rain_r = Rain()
+        self.frame = 0
+        self.stopping = False
+        self.fade_out_from: int | None = None
+        self._set_increments()
+
+    def _set_increments(self) -> None:
+        left = max(20.0, self.carrier)
+        right = max(20.0, self.carrier + self.beat)
+        self.inc_l = TWO_PI * left / RATE
+        self.inc_r = TWO_PI * right / RATE
+
+    def set_beat(self, beat: float) -> None:
+        if not math.isfinite(beat) or beat <= 0:
+            return
+        self.beat = float(beat)
+        self._set_increments()
+
+    def set_noise(self, on: bool) -> None:
+        self.noise_wanted = 1.0 if on else 0.0
+
+    def set_rain(self, on: bool) -> None:
+        self.rain_wanted = 1.0 if on else 0.0
+
+    def set_tones(self, on: bool) -> None:
+        self.tones_wanted = 1.0 if on else 0.0
+
+    def set_volume(self, value: float) -> None:
+        self.volume_wanted = self._clamp_level(value)
+
+    def set_noise_volume(self, value: float) -> None:
+        self.noise_vol_wanted = self._clamp_level(value)
+
+    def _clamp_level(self, value: float) -> float:
+        if not math.isfinite(value):
+            return 0.0
+        if value > 1.0:
+            value = value / 100.0
+        if value < 0.0:
+            return 0.0
+        if value > 1.0:
+            return 1.0
+        return float(value)
+
+    def request_stop(self) -> None:
+        if self.stopping:
+            return
+        self.stopping = True
+        self.fade_out_from = self.frame
+
+    def render(self, frames: int) -> bytes:
+        noise_step = 1.0 / max(1, int(NOISE_RAMP_SEC * RATE))
+        tone_up = 1.0 / max(1, int(TONE_FADE_IN_SEC * RATE))
+        tone_down = 1.0 / max(1, int(TONE_FADE_OUT_SEC * RATE))
+        vol_step = 1.0 / max(1, int(VOLUME_RAMP_SEC * RATE))
+        buf = array.array("h")
+        append = buf.append
+        sin = math.sin
+        rng = self.rng.uniform
+        brown_l = self.brown_l.tick
+        brown_r = self.brown_r.tick
+        rain_l = self.rain_l.tick
+        rain_r = self.rain_r.tick
+        fade_out_frames = max(1, int(TONE_FADE_OUT_SEC * RATE))
+        unit = lambda: (rng() + 1.0) * 0.5
+
+        for _ in range(frames):
+            if self.noise_gain < self.noise_wanted:
+                self.noise_gain = min(self.noise_wanted, self.noise_gain + noise_step)
+            elif self.noise_gain > self.noise_wanted:
+                self.noise_gain = max(self.noise_wanted, self.noise_gain - noise_step)
+            if self.rain_gain < self.rain_wanted:
+                self.rain_gain = min(self.rain_wanted, self.rain_gain + noise_step)
+            elif self.rain_gain > self.rain_wanted:
+                self.rain_gain = max(self.rain_wanted, self.rain_gain - noise_step)
+            if self.tone_gain < self.tones_wanted:
+                self.tone_gain = min(self.tones_wanted, self.tone_gain + tone_up)
+            elif self.tone_gain > self.tones_wanted:
+                self.tone_gain = max(self.tones_wanted, self.tone_gain - tone_down)
+            if self.volume_gain < self.volume_wanted:
+                self.volume_gain = min(self.volume_wanted, self.volume_gain + vol_step)
+            elif self.volume_gain > self.volume_wanted:
+                self.volume_gain = max(self.volume_wanted, self.volume_gain - vol_step)
+            if self.noise_vol_gain < self.noise_vol_wanted:
+                self.noise_vol_gain = min(self.noise_vol_wanted, self.noise_vol_gain + vol_step)
+            elif self.noise_vol_gain > self.noise_vol_wanted:
+                self.noise_vol_gain = max(self.noise_vol_wanted, self.noise_vol_gain - vol_step)
+
+            env = 1.0
+            if self.fade_out_from is not None:
+                elapsed = self.frame - self.fade_out_from
+                env = 1.0 - raised_cosine(elapsed / fade_out_frames)
+                if elapsed >= fade_out_frames:
+                    remaining = frames - (len(buf) // CHANNELS)
+                    for _pad in range(max(0, remaining)):
+                        append(0)
+                        append(0)
+                    self.frame += remaining
+                    return buf.tobytes()
+
+            # VOLUME is binaural tones only; noise has its own NOISEVOL.
+            left = sin(self.phase_l) * TONE_AMP * self.tone_gain * self.volume_gain
+            right = sin(self.phase_r) * TONE_AMP * self.tone_gain * self.volume_gain
+
+            if self.noise_gain > 0.0001:
+                gain = NOISE_AMP * self.noise_gain * self.noise_vol_gain
+                left += brown_l(rng()) * gain
+                right += brown_r(rng()) * gain
+            if self.rain_gain > 0.0001:
+                gain = NOISE_AMP * 1.15 * self.rain_gain
+                left += rain_l(rng(), unit()) * gain
+                right += rain_r(rng(), unit()) * gain
+
+            left = math.tanh(left * env)
+            right = math.tanh(right * env)
+            append(int(clamp(left) * 32767.0))
+            append(int(clamp(right) * 32767.0))
+
+            self.phase_l += self.inc_l
+            self.phase_r += self.inc_r
+            if self.phase_l > TWO_PI * 16:
+                self.phase_l %= TWO_PI
+            if self.phase_r > TWO_PI * 16:
+                self.phase_r %= TWO_PI
+            self.frame += 1
+
+        return buf.tobytes()
+
+    def finished(self) -> bool:
+        if self.fade_out_from is None:
+            return False
+        return (self.frame - self.fade_out_from) >= int(FADE_OUT_SEC * RATE)
+
+
+def apply_command(engine: Engine, line: str) -> None:
+    text = line.strip()
+    if not text:
+        return
+    parts = text.split()
+    op = parts[0].upper()
+    if op == "STOP":
+        engine.request_stop()
+        return
+    if op == "NOISE" and len(parts) >= 2:
+        engine.set_noise(parts[1].lower() not in ("0", "off", "false", "no"))
+        return
+    if op == "RAIN" and len(parts) >= 2:
+        engine.set_rain(parts[1].lower() not in ("0", "off", "false", "no"))
+        return
+    if op == "TONES" and len(parts) >= 2:
+        engine.set_tones(parts[1].lower() not in ("0", "off", "false", "no"))
+        return
+    if op == "PRESET" and len(parts) >= 2:
+        try:
+            engine.set_beat(float(parts[1]))
+        except ValueError:
+            return
+        return
+    if op == "VOLUME" and len(parts) >= 2:
+        try:
+            engine.set_volume(float(parts[1]))
+        except ValueError:
+            return
+        return
+    if op == "NOISEVOL" and len(parts) >= 2:
+        try:
+            engine.set_noise_volume(float(parts[1]))
+        except ValueError:
+            return
+
+
+def stdin_loop(cmd_queue: queue.Queue[str]) -> None:
+    # os.read on fd 0: Qt writes to a pipe, and text-mode stdin can sit in
+    # a 8 KiB buffer forever waiting for more bytes. Bytewise reads return
+    # as soon as a command line arrives.
+    try:
+        buf = b""
+        while True:
+            chunk = os.read(0, 64)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                cmd_queue.put(line.decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        pass
+    cmd_queue.put("STOP\n")
+
+
+def run_raw(engine: Engine, duration: float, sink) -> int:
+    total = int(duration * RATE) if duration > 0 else None
+    emitted = 0
+    while True:
+        if total is not None and emitted >= total:
+            break
+        frames = CHUNK if total is None else min(CHUNK, total - emitted)
+        sink.write(engine.render(frames))
+        emitted += frames
+        if engine.finished():
+            break
+    try:
+        sink.flush()
+    except BrokenPipeError:
+        return 0
+    return 0
+
+
+def run_live(engine: Engine, duration: float) -> int:
+    cmd = player_command()
+    if cmd is None:
+        sys.stderr.write("binaural: need pw-play or paplay on PATH\n")
+        return 1
+
+    player = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        bufsize=0,
+        preexec_fn=set_pdeathsig,
+    )
+    assert player.stdin is not None
+    shrink_pipe(player.stdin.fileno())
+
+    commands: queue.Queue[str] = queue.Queue()
+    threading.Thread(target=stdin_loop, args=(commands,), daemon=True).start()
+
+    stopping = False
+
+    def handle_stop(_signum=None, _frame=None) -> None:
+        nonlocal stopping
+        stopping = True
+        engine.request_stop()
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+
+    total = int(duration * RATE) if duration > 0 else None
+    emitted = 0
+    status = 0
+    origin = time.monotonic()
+    try:
+        while player.poll() is None:
+            while True:
+                try:
+                    apply_command(engine, commands.get_nowait())
+                except queue.Empty:
+                    break
+            if total is not None and emitted >= total:
+                engine.request_stop()
+            frames = CHUNK
+            if total is not None:
+                frames = min(CHUNK, max(0, total - emitted))
+                if frames == 0 and engine.finished():
+                    break
+                if frames == 0:
+                    frames = CHUNK
+            try:
+                player.stdin.write(engine.render(frames))
+                player.stdin.flush()
+            except BrokenPipeError:
+                break
+            emitted += frames
+            delay, origin = pace(origin, emitted, time.monotonic())
+            if delay > 0:
+                time.sleep(delay)
+            if engine.finished():
+                break
+    except KeyboardInterrupt:
+        engine.request_stop()
+        status = 0
+    finally:
+        try:
+            player.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            player.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            player.kill()
+            player.wait()
+    return status
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.carrier <= 0 or args.beat <= 0:
+        sys.stderr.write("binaural: carrier and beat must be positive\n")
+        return 2
+    engine = Engine(args.carrier, args.beat, args.noise, args.seed, rain=args.rain, tones=args.tones)
+    if args.raw or os.getenv("BINAURAL_RAW") == "1":
+        try:
+            return run_raw(engine, args.duration, sys.stdout.buffer)
+        except BrokenPipeError:
+            return 0
+    return run_live(engine, args.duration)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

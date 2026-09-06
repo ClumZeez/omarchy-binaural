@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Send one JSON IPC command to a running mpv UNIX socket."""
+
+import socket
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        return 2
+    path, payload = sys.argv[1], sys.argv[2]
+    sock = socket.socket(socket.AF_UNIX)
+    sock.settimeout(0.3)
+    try:
+        sock.connect(path)
+        sock.sendall(payload.encode("utf-8") + b"\n")
+    except OSError:
+        return 1
+    finally:
+        sock.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
