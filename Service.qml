@@ -44,6 +44,12 @@ Item {
   // Moodist light-rain.mp3 — local loop, no stream latency.
   readonly property string rainFile: sourceDir + "/assets/light-rain.mp3"
 
+  // Snapshot for bar right-click master mute / restore.
+  property bool muted: false
+  property bool snapPlaying: false
+  property bool snapNoise: false
+  property bool snapRain: false
+
   readonly property var preset: Beats.resolvePreset(presetId)
   readonly property string presetName: preset ? preset.name : "Binaural"
   readonly property string effect: preset ? preset.effect : ""
@@ -125,21 +131,16 @@ Item {
     else stopRain()
   }
 
-  function restoreBeds() {
-    applyNoiseLive(noise)
-    applyRainLive(rain)
-  }
-
-  function silence() {
+  function stopTones() {
+    if (!playing) return
     playing = false
-    applyNoiseLive(false)
-    applyRainLive(false)
     tell("TONES off\n")
   }
 
   function startPlayer(nextPreset) {
     var p = Beats.resolvePreset(nextPreset || presetId)
     var wasPlaying = playing
+    muted = false
     presetId = p.id
     playing = true
     schedulePersist()
@@ -147,44 +148,60 @@ Item {
       tell("PRESET " + p.beat + "\n")
       return
     }
+    // Tones only — never touch rain/noise.
     tell("PRESET " + p.beat + "\nTONES on\n")
-    restoreBeds()
   }
 
   function play(id) {
     var p = Beats.resolvePreset(id)
     if (playing && p.id === presetId) {
-      silence()
+      stopTones()
       return
     }
     startPlayer(p.id)
   }
 
   function stop() {
-    silence()
+    // IPC / tones-only stop. Master mute is toggle().
+    stopTones()
   }
 
+  function muteAll() {
+    if (muted) return
+    snapPlaying = playing
+    snapNoise = noiseLive
+    snapRain = rainLive
+    muted = true
+    playing = false
+    applyNoiseLive(false)
+    applyRainLive(false)
+    tell("TONES off\n")
+  }
+
+  function unmuteAll() {
+    if (!muted) return
+    muted = false
+    if (snapPlaying) {
+      var p = Beats.resolvePreset(presetId)
+      playing = true
+      tell("PRESET " + p.beat + "\nTONES on\n")
+    }
+    applyNoiseLive(snapNoise)
+    applyRainLive(snapRain)
+  }
+
+  // Bar right-click: only control that affects all three elements.
   function toggle() {
-    if (sounding) silence()
-    else startPlayer(presetId)
-  }
-
-  function captureBedPrefs() {
-    noise = noiseLive
-    rain = rainLive
-    schedulePersist()
+    if (muted) unmuteAll()
+    else if (sounding) muteAll()
+    // Nothing audible and not muted → no-op (do not auto-start a mix).
   }
 
   function setNoise(value) {
+    muted = false
     applyNoiseLive(!!value)
-    if (playing) {
-      noise = noiseLive
-      schedulePersist()
-      return
-    }
-    // No preset running: this click is the new mix, including the bed
-    // that is currently off.
-    captureBedPrefs()
+    noise = noiseLive
+    schedulePersist()
   }
 
   function toggleNoise() {
@@ -292,13 +309,10 @@ Item {
   }
 
   function setRain(value) {
+    muted = false
     applyRainLive(!!value)
-    if (playing) {
-      rain = rainLive
-      schedulePersist()
-      return
-    }
-    captureBedPrefs()
+    rain = rainLive
+    schedulePersist()
   }
 
   function toggleRain() {
@@ -315,6 +329,7 @@ Item {
       carrier: carrierHz,
       noise: noiseLive,
       rain: rainLive,
+      muted: muted,
       noisePref: noise,
       rainPref: rain,
       volume: Math.round(volume * 100),

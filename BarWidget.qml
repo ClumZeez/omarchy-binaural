@@ -9,7 +9,7 @@ import "Beats.js" as Beats
 // (one per shell); this widget is one per monitor and only renders + relays.
 //
 //   left click    popup with the six presets and the noise-floor icon
-//   right click   power the last preset + rain/noise prefs on or off
+//   right click   master mute / restore (tones + noise + rain)
 //   middle click  toggle the brown-noise floor
 BarWidget {
   id: root
@@ -24,6 +24,7 @@ BarWidget {
   readonly property bool noiseLive: ready ? beats.noiseLive : false
   readonly property bool rainLive: ready ? beats.rainLive : false
   readonly property bool sounding: ready ? beats.sounding : false
+  readonly property bool muted: ready ? beats.muted : false
   readonly property real volume: ready ? beats.volume : 1
   readonly property real noiseVolume: ready ? beats.noiseVolume : 1
   readonly property real rainVolume: ready ? beats.rainVolume : 1
@@ -47,8 +48,9 @@ BarWidget {
       return root.presetName + " · " + root.effect + " · " + root.beatText
              + (root.noiseLive ? " · noise" : "")
              + (root.rainLive ? " · rain" : "")
-    if (root.sounding) return "Binaural beats — beds on, right-click for " + root.presetName
-    return "Binaural beats — click for presets, right-click to play " + root.presetName
+    if (root.muted) return "Binaural — muted, right-click to restore"
+    if (root.sounding) return "Binaural — right-click to mute all"
+    return "Binaural — click for presets; right-click mutes/restores all"
   }
 
   property bool popupOpen: false

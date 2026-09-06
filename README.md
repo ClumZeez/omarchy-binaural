@@ -24,9 +24,9 @@ Alpha is the default. The noise floor is on by default.
 ## The popup
 
 A two-by-three grid: name, a word or two for the effect, the beat frequency.
-Click a tile to start it and restore the last rain/noise prefs. Click the
-playing tile (or right-click the bar icon) to silence everything; those
-prefs are kept for the next start.
+Click a tile to start or stop that preset's tones only — rain and noise stay
+as you left them. Right-click the bar icon to mute all three; right-click
+again restores the same mix.
 
 Grain and rain icons sit on the title row. Hover for the label, click to
 arm a bed. Brown noise is generated in-process; rain is a local loop of
@@ -41,7 +41,7 @@ their own vertical scrub; icons shrink while scrubbing and disappear at 0%
 | Action | Result |
 |---|---|
 | Left click | Open / close the popup |
-| Right click | Power the last preset + rain/noise prefs on or off |
+| Right click | Mute all three / restore previous mix |
 | Middle click | Toggle noise |
 
 While playing, the bar shows the sine pair plus the preset name.
