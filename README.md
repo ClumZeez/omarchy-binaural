@@ -1,6 +1,8 @@
 # Binaural — beats for the Omarchy bar
 
-Six binaural-beat presets plus optional brown-noise and rain sounds.
+![Binaural popup](preview.png)
+
+A minimal binaural beat suite, including options for brown noise or rain sounds with independent level controls.
 
 Headphones are required: a binaural beat is the difference between the two
 ears. The carrier is **110 Hz** (Gateway / Hemi-Sync range) and is not a

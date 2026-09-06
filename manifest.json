@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "callum.binaural",
   "name": "Binaural",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "author": "Callum Lees",
   "license": "MIT",
-  "description": "Six binaural-beat presets in the Omarchy bar, with optional brown-noise and local Moodist rain beds. Gateway-range carrier, headphones on.",
+  "description": "A minimal binaural beat suite, including options for brown noise or rain sounds with independent level controls",
   "kinds": [
     "service",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Binaural",
-    "description": "Binaural beats with brown-noise and local rain beds",
+    "description": "Binaural beats with brown noise and rain",
     "category": "Audio",
     "defaultSection": "center",
     "allowMultiple": false,
