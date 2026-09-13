@@ -3,3 +3,9 @@
 .DS_Store
 RELOAD_CHECK.txt
 __pycache__/
+
+# decoded rain PCM cache (generated on first rain)
+assets/light-rain.48000.s16le
+__pycache__/
+*.pyc
+*.bak.*

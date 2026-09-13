@@ -20,11 +20,11 @@ ears. The carrier is **110 Hz**.
 
 ## The popup
 
-Noise and rain icons sit on the top-right, binaural beat control is the oscilloscope in the middle: 
+Noise and rain icons sit on the top-right, binaural beat control is the oscilloscope in the middle:
 click to mute/unmute, drag to change volume.
 
-Brown noise is generated in-process; rain is a local loop of Moodist's
-**Light Rain** sample (see `THIRD_PARTY.md`).
+Brown noise is generated in-process; rain is Moodist's **Light Rain** sample
+decoded once to PCM and mixed in the same stream (see `THIRD_PARTY.md`).
 
 Right-click the bar icon to mute all three; right-click again restores the
 same mix.
@@ -42,9 +42,10 @@ While playing, the bar shows the beat name.
 
 - Omarchy with the Quattro shell (`omarchy-shell`, Quickshell based).
 - `python3` (standard library only) and `pw-play` (PipeWire) or `paplay`.
-- `mpv` for the local rain loop.
+- `ffmpeg` to decode the rain sample on first use (cached as
+  `assets/light-rain.48000.s16le`).
 
-No sudo.
+No sudo. No `mpv` (rain no longer registers an MPRIS player).
 
 ## Install
 
@@ -69,11 +70,23 @@ omarchy plugin add https://github.com/ClumZeez/omarchy-binaural --enable
 omarchy plugin remove callum.binaural
 ```
 
+## Keyboard (in the popup)
+
+With the popup open:
+
+| Key | Action |
+|---|---|
+| Arrow keys (or `h` `j` `k` `l`) | Move focus across noise, rain, and the six presets |
+| Enter / Space | Toggle the focused preset or bed |
+| Esc | Close the popup |
+
+No global Hyprland binds — keyboard control only works while the popup is open.
+
 ## IPC
 
 ```bash
 omarchy-shell binaural status
-omarchy-shell binaural beat alpha     # tones only (beds unchanged)
+omarchy-shell binaural play alpha     # tones only (beds unchanged)
 omarchy-shell binaural stop           # stop tones + noise + rain
 omarchy-shell binaural toggle         # mute all / restore (same as bar right-click)
 omarchy-shell binaural noise          # toggle noise
@@ -87,8 +100,11 @@ Per-bed levels stay in the popup (oscilloscope / noise / rain scrubs).
 
 ## How it works
 
-- `Service.qml` is the engine: one instance per shell, owns the tone
-  generator and the local mpv rain loop, remembers preset and bed prefs.
+- `Service.qml` is the engine: one instance per shell. It starts a single
+  Python generator only while tones, noise, or rain are sounding, and sends
+  `STOP` when all three are off so the PipeWire stream disappears.
+- Exactly one PipeWire stream: `application.name=Binaural` /
+  `media.name=Binaural` via `pw-play`. No `BinauralRain`, no MPRIS.
 - `BarWidget.qml` is the bar label and the popup, one per monitor.
 - `SineIcon.qml` tints `assets/SineWave.svg` for the bar and the hero.
 - `NoiseIcon.qml` / `RainIcon.qml` draw canvas marks (size follows volume
@@ -96,10 +112,9 @@ Per-bed levels stay in the popup (oscilloscope / noise / rain scrubs).
 - `VolumeScope.qml` / `Oscilloscope.qml` are the tone-volume control.
 - `Beats.js` is the preset table and config parsing.
 - `binaural` is a small Python generator. Left = 110 Hz, right = 110 Hz +
-  beat. Optional uncorrelated brown noise in each ear. Fade in on start,
-  fade out on stop. Live `PRESET` / `NOISE` / `NOISEVOL` / `VOLUME` /
-  `TONES` / `STOP` on stdin.
-- `rain-ipc` talks to mpv over a Unix socket for pause/volume.
+  beat. Optional uncorrelated brown noise in each ear. Rain PCM loop mixed
+  the same way. Fade in on start, fade out on stop. Live `PRESET` / `NOISE` /
+  `RAIN` / `NOISEVOL` / `RAINVOL` / `VOLUME` / `TONES` / `STOP` on stdin.
 - `assets/light-rain.mp3` is the rain bed (Moodist; see `THIRD_PARTY.md`).
 
 ## License

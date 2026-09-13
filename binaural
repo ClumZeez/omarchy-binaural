@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Stream stereo binaural beats, with an optional brown-noise floor, to PipeWire.
+"""Stream stereo binaural beats (+ optional brown noise + rain bed) to PipeWire.
 
 Left ear is the carrier, right ear is carrier + beat. Headphones required.
+One pw-play stream (application.name=Binaural). Rain is mixed in-process from
+a decoded Moodist light-rain PCM loop — no mpv, no MPRIS.
+
 Stdin commands (live mode):
 
     NOISE on|off
+    RAIN on|off
     TONES on|off
     PRESET <beat-hz>
     VOLUME <0-1 or 0-100>   # binaural tones only
     NOISEVOL <0-1 or 0-100>
+    RAINVOL <0-1 or 0-100>
     STOP
 """
 
@@ -48,6 +53,11 @@ DEFAULT_CARRIER = 110.0
 TONE_AMP = 0.20
 # Original bed 0.24, then −4 dB, then ×(80/42) to match rainVolumeMax 42→80.
 NOISE_AMP = 0.25 * (10 ** (-4.0 / 20.0)) * (80 / 42)
+# Prior rain used mpv --volume up to rainVolumeMax=80 with cubic softvol
+# ⇒ linear ≈ 0.8³ = 0.512 of the MP3 on its own stream. Mix into this
+# stream as a bed under tones/noise; 0.50 keeps perceived level in the
+# same ballpark once rain_vol_gain and PLAY_VOLUME are applied.
+RAIN_AMP = 0.50
 TONE_FADE_IN_SEC = 0.04
 TONE_FADE_OUT_SEC = 0.04
 NOISE_RAMP_SEC = 0.05
@@ -55,6 +65,8 @@ VOLUME_RAMP_SEC = 0.03
 # Kept as an alias so existing tests that fade the whole engine still work.
 FADE_OUT_SEC = TONE_FADE_OUT_SEC
 PLAY_VOLUME = "0.5"
+# Exit once everything is silent so the PipeWire stream disappears.
+IDLE_EXIT_SEC = 0.35
 
 
 class LCG:
@@ -80,6 +92,32 @@ class Brown:
         self.y = (self.y + white) * 0.996
         return self.y * 0.035
 
+
+class RainLoop:
+    """Loop decoded s16le stereo PCM (RATE Hz)."""
+
+    __slots__ = ("pcm", "frames", "pos")
+
+    def __init__(self, pcm: bytes) -> None:
+        if len(pcm) < CHANNELS * 2:
+            self.pcm = b"\x00\x00\x00\x00"
+            self.frames = 1
+        else:
+            # Trim to whole frames.
+            nbytes = len(pcm) - (len(pcm) % (CHANNELS * 2))
+            self.pcm = pcm[:nbytes] if nbytes else b"\x00\x00\x00\x00"
+            self.frames = max(1, len(self.pcm) // (CHANNELS * 2))
+        self.pos = 0
+
+    def tick(self) -> tuple[float, float]:
+        off = self.pos * CHANNELS * 2
+        # little-endian s16
+        left = int.from_bytes(self.pcm[off : off + 2], "little", signed=True) / 32768.0
+        right = int.from_bytes(self.pcm[off + 2 : off + 4], "little", signed=True) / 32768.0
+        self.pos += 1
+        if self.pos >= self.frames:
+            self.pos = 0
+        return left, right
 
 
 def clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -126,6 +164,9 @@ def shrink_pipe(fd: int, size: int = PIPE_BYTES) -> None:
 
 def player_command() -> list[str] | None:
     if shutil.which("pw-play"):
+        # Omit --media-role Music so this is not treated as a media player /
+        # MPRIS candidate. Default role keeps a single Binaural stream in the
+        # Omarchy Audio panel only while we are actually writing PCM.
         return [
             "pw-play",
             "--raw",
@@ -134,7 +175,6 @@ def player_command() -> list[str] | None:
             "--channels", str(CHANNELS),
             "--volume", PLAY_VOLUME,
             "--latency", "16ms",
-            "--media-role", "Music",
             "-P", "media.name=Binaural",
             "-P", "application.name=Binaural",
             "-",
@@ -153,6 +193,58 @@ def player_command() -> list[str] | None:
     return None
 
 
+def rain_cache_path(rain_file: str) -> str:
+    base, _ext = os.path.splitext(rain_file)
+    return f"{base}.{RATE}.s16le"
+
+
+def decode_rain_pcm(rain_file: str) -> bytes:
+    """Decode/resample rain to PCM s16le RATE stereo; cache beside the asset."""
+    if not rain_file or not os.path.isfile(rain_file):
+        return b""
+    cache = rain_cache_path(rain_file)
+    try:
+        if os.path.isfile(cache) and os.path.getmtime(cache) >= os.path.getmtime(rain_file):
+            with open(cache, "rb") as fh:
+                data = fh.read()
+            if len(data) >= CHANNELS * 2:
+                return data
+    except OSError:
+        pass
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        sys.stderr.write("binaural: ffmpeg not found; rain bed disabled\n")
+        return b""
+    cmd = [
+        ffmpeg, "-nostdin", "-v", "error",
+        "-i", rain_file,
+        "-f", "s16le",
+        "-acodec", "pcm_s16le",
+        "-ac", str(CHANNELS),
+        "-ar", str(RATE),
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=False)
+    except OSError as exc:
+        sys.stderr.write(f"binaural: rain decode failed: {exc}\n")
+        return b""
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        sys.stderr.write(f"binaural: rain decode failed: {err or 'empty'}\n")
+        return b""
+    data = proc.stdout
+    try:
+        tmp = cache + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, cache)
+    except OSError:
+        pass
+    return data
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stream binaural beats.")
     parser.add_argument("--carrier", type=float, default=DEFAULT_CARRIER)
@@ -161,6 +253,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-noise", dest="noise", action="store_false")
     parser.add_argument("--tones", dest="tones", action="store_true", default=True)
     parser.add_argument("--no-tones", dest="tones", action="store_false")
+    parser.add_argument("--rain", dest="rain", action="store_true", default=False)
+    parser.add_argument("--no-rain", dest="rain", action="store_false")
+    parser.add_argument("--rain-file", type=str, default="",
+                        help="Path to rain mp3 (decoded once to PCM cache).")
     parser.add_argument("--duration", type=float, default=0.0,
                         help="Seconds to emit then exit. 0 means run until STOP/SIGTERM.")
     parser.add_argument("--raw", action="store_true",
@@ -170,25 +266,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 class Engine:
-    def __init__(self, carrier: float, beat: float, noise: bool, seed: int, tones: bool = True) -> None:
+    def __init__(
+        self,
+        carrier: float,
+        beat: float,
+        noise: bool,
+        seed: int,
+        tones: bool = True,
+        rain: bool = False,
+        rain_pcm: bytes | None = None,
+    ) -> None:
         self.carrier = float(carrier)
         self.beat = float(beat)
         self.noise_wanted = 1.0 if noise else 0.0
+        self.rain_wanted = 1.0 if rain else 0.0
         self.tones_wanted = 1.0 if tones else 0.0
         self.noise_gain = 0.0
+        self.rain_gain = 0.0
         self.tone_gain = 0.0
         self.volume_wanted = 1.0
         self.volume_gain = 1.0
         self.noise_vol_wanted = 1.0
         self.noise_vol_gain = 1.0
+        self.rain_vol_wanted = 1.0
+        self.rain_vol_gain = 1.0
         self.rng = LCG(seed)
         self.phase_l = 0.0
         self.phase_r = 0.0
         self.brown_l = Brown()
         self.brown_r = Brown()
+        self.rain_loop = RainLoop(rain_pcm or b"")
         self.frame = 0
         self.stopping = False
         self.fade_out_from: int | None = None
+        self._silent_frames = 0
         self._set_increments()
 
     def _set_increments(self) -> None:
@@ -206,6 +317,8 @@ class Engine:
     def set_noise(self, on: bool) -> None:
         self.noise_wanted = 1.0 if on else 0.0
 
+    def set_rain(self, on: bool) -> None:
+        self.rain_wanted = 1.0 if on else 0.0
 
     def set_tones(self, on: bool) -> None:
         self.tones_wanted = 1.0 if on else 0.0
@@ -215,6 +328,9 @@ class Engine:
 
     def set_noise_volume(self, value: float) -> None:
         self.noise_vol_wanted = self._clamp_level(value)
+
+    def set_rain_volume(self, value: float) -> None:
+        self.rain_vol_wanted = self._clamp_level(value)
 
     def _clamp_level(self, value: float) -> float:
         if not math.isfinite(value):
@@ -231,7 +347,22 @@ class Engine:
         if self.stopping:
             return
         self.stopping = True
+        self.tones_wanted = 0.0
+        self.noise_wanted = 0.0
+        self.rain_wanted = 0.0
         self.fade_out_from = self.frame
+
+    def is_idle_silent(self) -> bool:
+        """True when nothing is wanted and gains have drained."""
+        if self.stopping:
+            return self.finished()
+        if self.tones_wanted or self.noise_wanted or self.rain_wanted:
+            return False
+        return (
+            self.tone_gain < 0.0001
+            and self.noise_gain < 0.0001
+            and self.rain_gain < 0.0001
+        )
 
     def render(self, frames: int) -> bytes:
         noise_step = 1.0 / max(1, int(NOISE_RAMP_SEC * RATE))
@@ -244,6 +375,7 @@ class Engine:
         rng = self.rng.uniform
         brown_l = self.brown_l.tick
         brown_r = self.brown_r.tick
+        rain_tick = self.rain_loop.tick
         fade_out_frames = max(1, int(TONE_FADE_OUT_SEC * RATE))
 
         for _ in range(frames):
@@ -251,6 +383,10 @@ class Engine:
                 self.noise_gain = min(self.noise_wanted, self.noise_gain + noise_step)
             elif self.noise_gain > self.noise_wanted:
                 self.noise_gain = max(self.noise_wanted, self.noise_gain - noise_step)
+            if self.rain_gain < self.rain_wanted:
+                self.rain_gain = min(self.rain_wanted, self.rain_gain + noise_step)
+            elif self.rain_gain > self.rain_wanted:
+                self.rain_gain = max(self.rain_wanted, self.rain_gain - noise_step)
             if self.tone_gain < self.tones_wanted:
                 self.tone_gain = min(self.tones_wanted, self.tone_gain + tone_up)
             elif self.tone_gain > self.tones_wanted:
@@ -263,6 +399,10 @@ class Engine:
                 self.noise_vol_gain = min(self.noise_vol_wanted, self.noise_vol_gain + vol_step)
             elif self.noise_vol_gain > self.noise_vol_wanted:
                 self.noise_vol_gain = max(self.noise_vol_wanted, self.noise_vol_gain - vol_step)
+            if self.rain_vol_gain < self.rain_vol_wanted:
+                self.rain_vol_gain = min(self.rain_vol_wanted, self.rain_vol_gain + vol_step)
+            elif self.rain_vol_gain > self.rain_vol_wanted:
+                self.rain_vol_gain = max(self.rain_vol_wanted, self.rain_vol_gain - vol_step)
 
             env = 1.0
             if self.fade_out_from is not None:
@@ -276,7 +416,7 @@ class Engine:
                     self.frame += remaining
                     return buf.tobytes()
 
-            # VOLUME is binaural tones only; noise has its own NOISEVOL.
+            # VOLUME is binaural tones only; noise/rain have their own *VOL.
             left = sin(self.phase_l) * TONE_AMP * self.tone_gain * self.volume_gain
             right = sin(self.phase_r) * TONE_AMP * self.tone_gain * self.volume_gain
 
@@ -284,6 +424,12 @@ class Engine:
                 gain = NOISE_AMP * self.noise_gain * self.noise_vol_gain
                 left += brown_l(rng()) * gain
                 right += brown_r(rng()) * gain
+
+            if self.rain_gain > 0.0001:
+                gain = RAIN_AMP * self.rain_gain * self.rain_vol_gain
+                rl, rr = rain_tick()
+                left += rl * gain
+                right += rr * gain
 
             left = math.tanh(left * env)
             right = math.tanh(right * env)
@@ -318,6 +464,8 @@ def apply_command(engine: Engine, line: str) -> None:
     if op == "NOISE" and len(parts) >= 2:
         engine.set_noise(parts[1].lower() not in ("0", "off", "false", "no"))
         return
+    if op == "RAIN" and len(parts) >= 2:
+        engine.set_rain(parts[1].lower() not in ("0", "off", "false", "no"))
         return
     if op == "TONES" and len(parts) >= 2:
         engine.set_tones(parts[1].lower() not in ("0", "off", "false", "no"))
@@ -337,6 +485,12 @@ def apply_command(engine: Engine, line: str) -> None:
     if op == "NOISEVOL" and len(parts) >= 2:
         try:
             engine.set_noise_volume(float(parts[1]))
+        except ValueError:
+            return
+        return
+    if op == "RAINVOL" and len(parts) >= 2:
+        try:
+            engine.set_rain_volume(float(parts[1]))
         except ValueError:
             return
 
@@ -371,6 +525,13 @@ def run_raw(engine: Engine, duration: float, sink) -> int:
         emitted += frames
         if engine.finished():
             break
+        if total is None and engine.is_idle_silent():
+            # In raw/test mode without duration, do not spin forever when idle.
+            engine._silent_frames += frames
+            if engine._silent_frames >= int(IDLE_EXIT_SEC * RATE):
+                break
+        else:
+            engine._silent_frames = 0
     try:
         sink.flush()
     except BrokenPipeError:
@@ -412,6 +573,7 @@ def run_live(engine: Engine, duration: float) -> int:
     emitted = 0
     status = 0
     origin = time.monotonic()
+    silent = 0
     try:
         while player.poll() is None:
             while True:
@@ -439,6 +601,12 @@ def run_live(engine: Engine, duration: float) -> int:
                 time.sleep(delay)
             if engine.finished():
                 break
+            if engine.is_idle_silent():
+                silent += frames
+                if silent >= int(IDLE_EXIT_SEC * RATE):
+                    break
+            else:
+                silent = 0
     except KeyboardInterrupt:
         engine.request_stop()
         status = 0
@@ -460,7 +628,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.carrier <= 0 or args.beat <= 0:
         sys.stderr.write("binaural: carrier and beat must be positive\n")
         return 2
-    engine = Engine(args.carrier, args.beat, args.noise, args.seed, tones=args.tones)
+    rain_pcm = decode_rain_pcm(args.rain_file) if args.rain_file else b""
+    engine = Engine(
+        args.carrier,
+        args.beat,
+        args.noise,
+        args.seed,
+        tones=args.tones,
+        rain=args.rain,
+        rain_pcm=rain_pcm,
+    )
     if args.raw or os.getenv("BINAURAL_RAW") == "1":
         try:
             return run_raw(engine, args.duration, sys.stdout.buffer)

@@ -10,6 +10,7 @@ import "Beats.js" as Beats
 //
 //   left click    popup with the six presets and bed controls
 //   right click   master mute / restore (tones + noise + rain)
+//   in popup      arrows move focus; Enter/Space activates; Esc closes
 BarWidget {
   id: root
   moduleName: "callum.binaural"
@@ -49,15 +50,78 @@ BarWidget {
              + (root.rainLive ? " · rain" : "")
     if (root.muted) return "Binaural — muted, right-click to restore"
     if (root.sounding) return "Binaural — right-click to mute all"
-    return "Binaural — click for presets; right-click mutes/restores all"
+    return "Binaural — click for presets (arrows + Enter in popup); right-click mutes/restores all"
   }
 
   property bool popupOpen: false
 
+  // Keyboard cursor inside the popup. Beds sit on row -1; presets are a 2×3 grid.
+  property int cursorRow: 0
+  property int cursorCol: 0
+
   readonly property bool opened: popupOpen
-  function open() { popupOpen = true }
+  function open() {
+    popupOpen = true
+    resetCursor()
+  }
   function close() { popupOpen = false }
-  function togglePanel() { popupOpen = !popupOpen }
+  function togglePanel() {
+    popupOpen = !popupOpen
+    if (popupOpen) resetCursor()
+  }
+
+  function presetAt(row, col) {
+    var list = root.presets
+    if (!Array.isArray(list)) return null
+    var i = row * 2 + col
+    return (i >= 0 && i < list.length) ? list[i] : null
+  }
+
+  function resetCursor() {
+    // Land on the playing preset when possible; otherwise Alpha.
+    if (root.playing && root.presetId) {
+      var list = root.presets
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].id === root.presetId) {
+          cursorRow = Math.floor(i / 2)
+          cursorCol = i % 2
+          return
+        }
+      }
+    }
+    cursorRow = 1
+    cursorCol = 0
+  }
+
+  function moveCursor(dx, dy) {
+    var row = cursorRow + dy
+    var col = cursorCol + dx
+    if (row < -1) row = -1
+    if (row > 2) row = 2
+    if (col < 0) col = 0
+    if (col > 1) col = 1
+    cursorRow = row
+    cursorCol = col
+  }
+
+  function cursorOnNoise() { return cursorRow < 0 && cursorCol === 0 }
+  function cursorOnRain() { return cursorRow < 0 && cursorCol === 1 }
+  function cursorOnPreset(id) {
+    if (cursorRow < 0) return false
+    var p = presetAt(cursorRow, cursorCol)
+    return !!(p && p.id === id)
+  }
+
+  function activateCursor() {
+    if (!root.ready) return
+    if (cursorRow < 0) {
+      if (cursorCol === 0) root.beats.toggleNoise()
+      else root.beats.toggleRain()
+      return
+    }
+    var p = presetAt(cursorRow, cursorCol)
+    if (p && p.id) root.beats.play(p.id)
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -76,16 +140,26 @@ BarWidget {
     property var preset: ({})
     readonly property bool selected: root.playing && preset && preset.id === root.presetId
     readonly property bool hot: tileMouse.containsMouse
+    readonly property bool hasCursor: preset && root.cursorOnPreset(preset.id)
+    // Theme selected-border-width defaults to 0; force a 1px box so the
+    // grid seams stay visible (and so a selected fill edge cannot stand
+    // in for a neighbor's missing left border).
+    readonly property var tileBorderSpec: {
+      var state = selected ? "selected" : (hasCursor ? "focus" : (hot ? "hover-cursor" : "normal"))
+      var spec = Border.controlSpec(state, root.fg, root.accent)
+      var w = Math.max(Border.left(spec), Border.right(spec), Border.top(spec), Border.bottom(spec), Border.uniformWidth(spec))
+      if (w <= 0)
+        return Border.withWidth(spec, Math.max(1, Style.normalBorderWidth))
+      return spec
+    }
 
     implicitHeight: Style.space(76)
     radius: Style.cornerRadius
-    clip: true
+    // Do not clip — BorderOverlay AA sits on the edge and clip eats it.
     color: selected
       ? Style.selectedFillFor(root.fg, root.accent)
-      : (hot ? Style.hoverFillFor(root.fg, root.accent) : Style.normalFillFor(root.fg, root.accent))
-    borderSpec: selected
-      ? Border.controlSpec("selected", root.fg, root.accent)
-      : (hot ? Border.controlSpec("hover-cursor", root.fg, root.accent) : Border.controlSpec("normal", root.fg, root.accent))
+      : Style.controlFill(hasCursor, hot, root.fg, root.accent)
+    borderSpec: tileBorderSpec
 
     Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -170,12 +244,36 @@ BarWidget {
     tooltipText: root.tooltip
     horizontalMargin: 8.75
     verticalPadding: 8.75
+    // Keep playing-chip width stable across presets so the popup anchor
+    // does not drift when switching Delta↔SMR↔Gamma (SMR is shortest).
     fixedWidth: {
       if (root.vertical) return -1
-      if (root.playing) return contentRow.implicitWidth + Style.spaceReal(8.75) * 2
+      if (root.playing) {
+        return Math.ceil(
+          Style.bar.iconCanvas + Style.space(6) + longestPresetLabel.implicitWidth
+          + Style.spaceReal(8.75) * 2
+        )
+      }
       return Style.bar.iconSlot
     }
     fixedHeight: root.vertical ? Style.bar.iconSlot : -1
+
+    Text {
+      id: longestPresetLabel
+      visible: false
+      textFormat: Text.PlainText
+      text: {
+        var best = "Gamma"
+        var list = root.presets
+        for (var i = 0; i < list.length; i++) {
+          var n = list[i] && list[i].name ? String(list[i].name) : ""
+          if (n.length > best.length) best = n
+        }
+        return best
+      }
+      font.family: button.fontFamily
+      font.pixelSize: button.fontSize
+    }
 
     onPressed: function(b) {
       if (!root.ready) return
@@ -202,23 +300,33 @@ BarWidget {
         color: root.iconColor
         font.family: button.fontFamily
         font.pixelSize: button.fontSize
+        width: longestPresetLabel.implicitWidth
+        elide: Text.ElideNone
         anchors.verticalCenter: parent.verticalCenter
       }
     }
   }
 
-  PopupCard {
+  KeyboardPanel {
     id: popup
     anchorItem: root
     bar: root.bar
     owner: root
     open: root.popupOpen
+    focusTarget: keyCatcher
     contentWidth: popup.fittedContentWidth(Style.space(456))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
 
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onCloseRequested: root.close()
+      onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onActivateRequested: root.activateCursor()
+
     Column {
       id: column
-      anchors.fill: parent
+      width: parent.width
       spacing: Style.space(12)
 
       Item {
@@ -333,6 +441,7 @@ BarWidget {
 
           FloorButton {
             on: root.noiseLive
+            hasCursor: root.cursorOnNoise()
             tip: "Noise"
             volume: root.noiseVolume
             glyph: noiseGlyph
@@ -341,6 +450,7 @@ BarWidget {
           }
           FloorButton {
             on: root.rainLive
+            hasCursor: root.cursorOnRain()
             tip: "Rain"
             volume: root.rainVolume
             glyph: rainGlyph
@@ -351,11 +461,16 @@ BarWidget {
       }
 
       Row {
+        // Floor column widths so an odd leftover pixel cannot overlap the
+        // neighbor. A 1px overlap lets the selected fill cover the right
+        // column's left border (visible when a left-column preset is on).
+        id: presetRow
         width: parent.width
-        spacing: Style.space(8)
+        spacing: Style.space(10)
+        readonly property int colWidth: Math.max(1, Math.floor((width - spacing) / 2))
 
         Column {
-          width: (parent.width - parent.spacing) / 2
+          width: presetRow.colWidth
           spacing: Style.space(8)
 
           Repeater {
@@ -369,7 +484,7 @@ BarWidget {
         }
 
         Column {
-          width: (parent.width - parent.spacing) / 2
+          width: presetRow.colWidth
           spacing: Style.space(8)
 
           Repeater {
@@ -383,11 +498,13 @@ BarWidget {
         }
       }
     }
+    }
   }
 
   component FloorButton: Item {
     id: floor
     property bool on: false
+    property bool hasCursor: false
     property string tip: ""
     property real volume: 1
     property Component glyph: null
@@ -399,7 +516,9 @@ BarWidget {
 
     readonly property bool hot: scrub.containsMouse || scrub.dragging
     readonly property color glyphColor: {
-      // Off / 0%: inactive (full rest mark). On: accent, lighter while hot.
+      // Keyboard cursor wins; else off/0% is inactive; on is accent (lighter while hot).
+      if (floor.hasCursor)
+        return root.accent
       if (!floor.on || floor.volume <= 0.001)
         return root.fg
       if (floor.hot)
@@ -407,9 +526,24 @@ BarWidget {
       return root.accent
     }
 
+    BorderSurface {
+      anchors.centerIn: parent
+      width: Math.ceil((glyphLoader.item ? glyphLoader.item.width : Style.font.display) + Style.space(10))
+      height: Math.ceil(Style.font.display + Style.space(10))
+      radius: Math.min(Style.cornerRadius, Math.floor(height / 2))
+      color: floor.hasCursor ? Style.focusFillFor(root.fg, root.accent) : "transparent"
+      borderSpec: floor.hasCursor
+        ? Border.controlSpec("focus", root.fg, root.accent)
+        : Border.controlSpec("normal", root.fg, root.accent)
+      opacity: floor.hasCursor ? 1 : 0
+      z: 0
+      Behavior on opacity { NumberAnimation { duration: 100 } }
+    }
+
     Loader {
       id: glyphLoader
       anchors.centerIn: parent
+      z: 1
       sourceComponent: floor.glyph
       onLoaded: {
         if (!item) return

@@ -4,9 +4,9 @@ import Quickshell.Io
 import qs.Commons
 import "Beats.js" as Beats
 
-// One generator process for the whole session. Clicks only write stdin
-// (TONES / NOISE / PRESET) so on/off is a short fade, not a process spawn.
-// Rain is a local mpv loop (Moodist light-rain); toggles pause/unpause over IPC.
+// One generator process → one PipeWire stream (application.name=Binaural).
+// Tones, brown noise, and rain are mixed inside Python. No mpv / MPRIS.
+// Process starts only while something is sounding; STOP tears it down.
 Item {
   id: root
 
@@ -20,8 +20,6 @@ Item {
     return decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")).replace(/\/$/, "")
   }
   readonly property string generatorPath: sourceDir + "/binaural"
-  readonly property string rainIpcPath: sourceDir + "/rain-ipc"
-  readonly property string rainSock: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-binaural-rain.sock"
 
   readonly property var entry: Beats.findEntry(shell ? shell.shellConfig : null, pluginId)
   readonly property var config: Beats.config(entry)
@@ -39,10 +37,7 @@ Item {
   property real rainVolume: 1
   property real masterVolume: 1
   property bool hydrated: false
-  property bool rainNeedsRespawn: true
-  // mpv volume (0–100+) at rain scrub 100%. Edit this to change rain loudness.
-  readonly property real rainVolumeMax: 80
-  // Moodist light-rain.mp3 — local loop, no stream latency.
+  // Moodist light-rain.mp3 — decoded once by the generator to PCM cache.
   readonly property string rainFile: sourceDir + "/assets/light-rain.mp3"
 
   // Snapshot for bar right-click master mute / restore.
@@ -87,14 +82,7 @@ Item {
     noiseVolume = config.noiseVolume
     rainVolume = config.rainVolume
     masterVolume = config.masterVolume
-    ensureGenerator()
-    // Warm mpv paused so the first rain toggle is an IPC unpause, not a spawn.
-    warmRain()
-  }
-
-  function warmRain() {
-    if (rainPlayer.running) return
-    startRain(true)
+    // Do not warm-start the generator — no stream until something sounds.
   }
 
   function generatorArgs() {
@@ -104,18 +92,23 @@ Item {
       "--carrier", String(carrierHz),
       "--beat", String(p.beat),
       "--no-noise",
-      "--no-tones"
+      "--no-tones",
+      "--rain-file", rainFile
     ]
   }
 
   function ensureGenerator() {
     if (player.running) return
+    if (!(playing || noiseLive || rainLive)) return
     player.command = generatorArgs()
     player.running = true
   }
 
   function tell(line) {
-    ensureGenerator()
+    if (!player.running) {
+      if (!(playing || noiseLive || rainLive)) return
+      ensureGenerator()
+    }
     if (!player.running) return
     var parts = String(line).split("\n")
     for (var i = 0; i < parts.length; i++) {
@@ -123,21 +116,42 @@ Item {
     }
   }
 
+  function shutdownIfIdle() {
+    if (playing || noiseLive || rainLive) return
+    if (!player.running) return
+    // Fade beds/tones then STOP so the PipeWire stream disappears.
+    player.write("TONES off\nNOISE off\nRAIN off\nSTOP\n")
+  }
+
   function applyNoiseLive(on) {
     noiseLive = !!on
-    tell("NOISE " + (noiseLive ? "on" : "off") + "\n")
+    if (noiseLive) {
+      ensureGenerator()
+      tell("NOISE on\n")
+      tell("NOISEVOL " + noiseGain() + "\n")
+    } else {
+      if (player.running) tell("NOISE off\n")
+      shutdownIfIdle()
+    }
   }
 
   function applyRainLive(on) {
     rainLive = !!on
-    if (rainLive) startRain()
-    else stopRain()
+    if (rainLive) {
+      ensureGenerator()
+      tell("RAIN on\n")
+      tell("RAINVOL " + rainGain() + "\n")
+    } else {
+      if (player.running) tell("RAIN off\n")
+      shutdownIfIdle()
+    }
   }
 
   function stopTones() {
     if (!playing) return
     playing = false
-    tell("TONES off\n")
+    if (player.running) tell("TONES off\n")
+    shutdownIfIdle()
   }
 
   function startPlayer(nextPreset) {
@@ -147,12 +161,14 @@ Item {
     presetId = p.id
     playing = true
     schedulePersist()
+    ensureGenerator()
     if (wasPlaying) {
       tell("PRESET " + p.beat + "\n")
       return
     }
     // Tones only — never touch rain/noise.
     tell("PRESET " + p.beat + "\nTONES on\n")
+    tell("VOLUME " + toneGain() + "\n")
   }
 
   function play(id) {
@@ -171,9 +187,10 @@ Item {
     snapNoise = false
     snapRain = false
     playing = false
-    applyNoiseLive(false)
-    applyRainLive(false)
-    tell("TONES off\n")
+    noiseLive = false
+    rainLive = false
+    if (player.running)
+      player.write("TONES off\nNOISE off\nRAIN off\nSTOP\n")
   }
 
   function muteAll() {
@@ -183,9 +200,10 @@ Item {
     snapRain = rainLive
     muted = true
     playing = false
-    applyNoiseLive(false)
-    applyRainLive(false)
-    tell("TONES off\n")
+    noiseLive = false
+    rainLive = false
+    if (player.running)
+      player.write("TONES off\nNOISE off\nRAIN off\nSTOP\n")
   }
 
   function unmuteAll() {
@@ -194,7 +212,9 @@ Item {
     if (snapPlaying) {
       var p = Beats.resolvePreset(presetId)
       playing = true
+      ensureGenerator()
       tell("PRESET " + p.beat + "\nTONES on\n")
+      tell("VOLUME " + toneGain() + "\n")
     }
     applyNoiseLive(snapNoise)
     applyRainLive(snapRain)
@@ -218,19 +238,6 @@ Item {
     setNoise(!noiseLive)
   }
 
-  function rainJson(cmd) {
-    // Fire-and-forget: a single Process drops mid-scrub updates when the
-    // previous python IPC is still running, which felt like volume jumps.
-    Quickshell.execDetached([
-      "python3", rainIpcPath, rainSock,
-      JSON.stringify({ command: cmd })
-    ])
-  }
-
-  function rainIpc(paused) {
-    rainJson(["set_property", "pause", !!paused])
-  }
-
   function toneGain() {
     return Math.max(0, Math.min(1, volume * masterVolume))
   }
@@ -239,24 +246,14 @@ Item {
     return Math.max(0, Math.min(1, noiseVolume * masterVolume))
   }
 
-  function rainVolumeValue() {
-    // Per-bed scrub × master. mpv softvol is cubic — invert so equal %
-    // keeps relative loudness vs linear noise.
-    var t = Math.max(0, Math.min(1, rainVolume * masterVolume))
-    if (t <= 0)
-      return 0
-    return Math.round(rainVolumeMax * Math.pow(t, 1.0 / 3.0))
-  }
-
-  function applyRainVolume() {
-    if (!rainPlayer.running) return
-    rainJson(["set_property", "volume", rainVolumeValue()])
+  function rainGain() {
+    return Math.max(0, Math.min(1, rainVolume * masterVolume))
   }
 
   function applyAllVolumes() {
     tell("VOLUME " + toneGain() + "\n")
     tell("NOISEVOL " + noiseGain() + "\n")
-    applyRainVolume()
+    tell("RAINVOL " + rainGain() + "\n")
   }
 
   // Oscilloscope: tones only (still scaled by masterVolume).
@@ -297,7 +294,7 @@ Item {
     if (Math.abs(next - rainVolume) >= 0.001) {
       rainVolume = next
       schedulePersist()
-      applyRainVolume()
+      tell("RAINVOL " + rainGain() + "\n")
     }
     // 0% disables the bed; any audible level arms it.
     if (next <= 0.001) {
@@ -305,40 +302,6 @@ Item {
     } else if (!rainLive) {
       setRain(true)
     }
-  }
-
-  function startRain(paused) {
-    var startPaused = !!paused
-    if (rainPlayer.running && !rainNeedsRespawn) {
-      if (!startPaused) {
-        rainIpc(false)
-        applyRainVolume()
-      }
-      return
-    }
-    // Respawn when the rain asset or mpv flags change.
-    rainNeedsRespawn = false
-    rainRetry.stop()
-    if (rainPlayer.running)
-      rainPlayer.running = false
-    Quickshell.execDetached(["rm", "-f", rainSock])
-    var cmd = [
-      "mpv", "--no-video", "--really-quiet",
-      "--loop-file=inf",
-      "--volume=" + String(rainVolumeValue()),
-      "--input-ipc-server=" + rainSock,
-      "--audio-client-name=BinauralRain",
-      rainFile
-    ]
-    if (startPaused)
-      cmd.splice(3, 0, "--pause")
-    rainPlayer.command = cmd
-    rainPlayer.running = true
-  }
-
-  function stopRain() {
-    rainRetry.stop()
-    if (rainPlayer.running) rainIpc(true)
   }
 
   function setRain(value) {
@@ -383,38 +346,26 @@ Item {
   Component.onCompleted: hydrate()
 
   Process {
-    id: rainPlayer
-    onExited: function() {
-      // Local loop should not exit; if it does, respawn while rain is armed.
-      if (root.rainLive) {
-        root.rainNeedsRespawn = true
-        rainRetry.restart()
-      }
-    }
-  }
-
-  Timer {
-    id: rainRetry
-    interval: 1200
-    repeat: false
-    onTriggered: if (root.rainLive) root.startRain()
-  }
-
-  Process {
     id: player
     stdinEnabled: true
     onStarted: {
       player.write("VOLUME " + root.toneGain() + "\n")
       player.write("NOISEVOL " + root.noiseGain() + "\n")
+      player.write("RAINVOL " + root.rainGain() + "\n")
       player.write("NOISE " + (root.noiseLive ? "on" : "off") + "\n")
+      player.write("RAIN " + (root.rainLive ? "on" : "off") + "\n")
       if (root.playing) {
         var p = Beats.resolvePreset(root.presetId)
         player.write("PRESET " + p.beat + "\n")
         player.write("TONES on\n")
+      } else {
+        player.write("TONES off\n")
       }
     }
     onExited: function() {
-      Qt.callLater(root.ensureGenerator)
+      // Only respawn if something still needs audio (crash mid-play).
+      if (root.playing || root.noiseLive || root.rainLive)
+        Qt.callLater(root.ensureGenerator)
     }
   }
 
@@ -422,6 +373,8 @@ Item {
     target: "binaural"
 
     function status(): string { return root.statusJson() }
+    function play(id: string): string { root.play(id); return root.statusJson() }
+    // Alias kept for sessions that still call `beat` after the 1.5.x rename.
     function beat(id: string): string { root.play(id); return root.statusJson() }
     function stop(): string { root.stop(); return root.statusJson() }
     function toggle(): string { root.toggle(); return root.statusJson() }
