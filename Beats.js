@@ -3,11 +3,14 @@
 // Pure logic for the binaural plugin. No Qt objects so it can be
 // unit-tested with plain node.
 
-// Hemi-Sync / Gateway Experience carriers sit in the 100–200 Hz band.
-// 110 Hz (A2) is low enough to fuse as a beat, high enough not to rumble.
-var CARRIER_HZ = 110
+// Carrier scrub band. Default/reset is 100 Hz; drag covers 60–200.
+var DEFAULT_CARRIER = 100
+var MIN_CARRIER = 60
+var MAX_CARRIER = 200
+// Back-compat alias for older tests / call sites.
+var CARRIER_HZ = DEFAULT_CARRIER
 
-var DEFAULT_PRESET = "alpha"
+var DEFAULT_PRESET = "delta"
 var DEFAULT_NOISE = true
 var DEFAULT_VOLUME = 1
 
@@ -52,10 +55,38 @@ function clampVolume(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback
   var n = Number(value)
   if (!isFinite(n)) return fallback
-  if (n > 1) n = n / 100
+  // Config may use 0–100 percent. Values just above 1 (e.g. 1.05 from a
+  // +5% keyboard nudge) must clamp to full — not be read as 1.05%.
+  if (n > 1) {
+    if (n >= 2 && n <= 100) n = n / 100
+    else n = 1
+  }
   if (n < 0) n = 0
   if (n > 1) n = 1
   return n
+}
+
+function clampCarrier(value, fallback) {
+  if (fallback === undefined) fallback = DEFAULT_CARRIER
+  if (value === undefined || value === null || value === "") return fallback
+  var n = Number(value)
+  if (!isFinite(n)) return fallback
+  if (n < MIN_CARRIER) n = MIN_CARRIER
+  if (n > MAX_CARRIER) n = MAX_CARRIER
+  return n
+}
+
+function levelFromCarrier(hz) {
+  var c = clampCarrier(hz)
+  return (c - MIN_CARRIER) / (MAX_CARRIER - MIN_CARRIER)
+}
+
+function carrierFromLevel(t) {
+  var x = Number(t)
+  if (!isFinite(x)) x = levelFromCarrier(DEFAULT_CARRIER)
+  if (x < 0) x = 0
+  if (x > 1) x = 1
+  return clampCarrier(MIN_CARRIER + x * (MAX_CARRIER - MIN_CARRIER))
 }
 
 function presetById(id) {
@@ -103,6 +134,6 @@ function config(entry) {
     noiseVolume: clampVolume(e.noiseVolume, DEFAULT_VOLUME),
     rainVolume: clampVolume(e.rainVolume, DEFAULT_VOLUME),
     masterVolume: clampVolume(e.masterVolume, DEFAULT_VOLUME),
-    carrier: CARRIER_HZ
+    carrier: clampCarrier(e.carrier, DEFAULT_CARRIER)
   }
 }

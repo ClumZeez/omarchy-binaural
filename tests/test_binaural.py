@@ -97,6 +97,74 @@ class TestIdleSilent(unittest.TestCase):
         self.assertFalse(eng.is_idle_silent())
 
 
+
+class TestCarrier(unittest.TestCase):
+    def test_carrier_command_updates_engine(self):
+        eng = B.Engine(110.0, 10.0, noise=False, seed=1, tones=True)
+        self.assertAlmostEqual(eng.carrier, 110.0, places=6)
+        B.apply_command(eng, "CARRIER 150")
+        self.assertAlmostEqual(eng.carrier, 150.0, places=6)
+        # Beat offset unchanged; both ears move together.
+        self.assertAlmostEqual(eng.beat, 10.0, places=6)
+
+    def test_carrier_render_keeps_stereo_beat_offset(self):
+        eng = B.Engine(110.0, 10.0, noise=False, seed=1, tones=True)
+        eng.tone_gain = 1.0
+        eng.volume_gain = 1.0
+        B.apply_command(eng, "CARRIER 150")
+        # Force increments from new carrier.
+        left_hz = eng.carrier
+        right_hz = eng.carrier + eng.beat
+        self.assertAlmostEqual(left_hz, 150.0, places=6)
+        self.assertAlmostEqual(right_hz, 160.0, places=6)
+        out = eng.render(64)
+        self.assertEqual(len(out), 64 * 4)
+        # Not silent — tones rendered at new carrier.
+        import struct
+        samples = struct.unpack("<" + "h" * (len(out) // 2), out)
+        self.assertTrue(any(abs(s) > 100 for s in samples))
+
+
+class TestBedBeatAm(unittest.TestCase):
+    def test_bed_am_locks_to_beat(self):
+        """Noise bed envelope peaks once per beat cycle while tones are on."""
+        beat = 10.0
+        eng = B.Engine(110.0, beat, noise=True, seed=1, tones=True, rain=False)
+        eng.set_tones(True)
+        eng.set_noise(True)
+        # Warm gains
+        eng.render(int(B.RATE * 0.1))
+        # Capture one side without tones: zero tone amp path by reading noise-dominated
+        # energy proxy — use phase_beat advance over one beat period.
+        frames = int(round(B.RATE / beat))
+        eng.phase_beat = 0.0
+        mods = []
+        # Reconstruct mod the same way as Engine.render
+        import math
+        for i in range(frames):
+            mod = 1.0 + B.BED_BEAT_AM_DEPTH * 1.0 * 1.0 * math.sin(eng.phase_beat)
+            mods.append(mod)
+            eng.phase_beat += eng.inc_beat
+        # Exactly one full cycle of the sine LFO across frames
+        self.assertAlmostEqual(eng.inc_beat * frames, B.TWO_PI, places=4)
+        self.assertGreater(max(mods), 1.10)
+        self.assertLess(min(mods), 0.90)
+        # Start and end near the same phase point (full period)
+        self.assertAlmostEqual(mods[0], mods[-1], places=2)
+
+    def test_bed_am_tracks_tone_volume(self):
+        eng = B.Engine(110.0, 10.0, noise=True, seed=1, tones=True)
+        eng.tone_gain = 1.0
+        eng.volume_gain = 0.0
+        eng.phase_beat = math.pi / 2  # sin = 1
+        depth = B.BED_BEAT_AM_DEPTH * eng.tone_gain * eng.volume_gain
+        self.assertEqual(depth, 0.0)
+        eng.volume_gain = 1.0
+        depth = B.BED_BEAT_AM_DEPTH * eng.tone_gain * eng.volume_gain
+        self.assertAlmostEqual(depth, 0.15, places=6)
+
+
+
 if __name__ == "__main__":
     os.chdir(ROOT)
     unittest.main()

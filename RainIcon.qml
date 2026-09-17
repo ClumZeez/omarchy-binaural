@@ -1,8 +1,8 @@
 import QtQuick
 import qs.Commons
 
-// While dragging: size follows volume (1% = small, 0% = gone).
-// At rest: always the full default mark (launch look); color comes from FloorButton.
+// While scrubbing: drop size follows volume instantly.
+// On release: drawT eases back to the full rest mark.
 Item {
   id: root
 
@@ -10,13 +10,13 @@ Item {
   property real iconSize: Style.font.icon
   property real level: 1
   property bool scrubbing: false
+  property real drawT: 1
   readonly property real drawn: iconSize * 1.24
 
   implicitWidth: drawn
   implicitHeight: drawn
   width: drawn
   height: drawn
-  // Only hide at 0% while actively scrubbing; rest always shows the mark.
   opacity: (root.scrubbing && Math.round(Math.max(0, Math.min(1, root.level)) * 100) <= 0) ? 0 : 1
 
   readonly property var dots: [
@@ -28,9 +28,31 @@ Item {
 
   Behavior on color { ColorAnimation { duration: 100 } }
   Behavior on opacity { NumberAnimation { duration: 80 } }
+  Behavior on drawT {
+    id: drawBehavior
+    enabled: false
+    NumberAnimation { duration: 380; easing.type: Easing.InOutCubic }
+  }
+
+  onScrubbingChanged: {
+    if (scrubbing) {
+      drawBehavior.enabled = false
+      drawT = Math.max(0.08, Math.max(0, Math.min(1, level)))
+      canvas.requestPaint()
+    } else {
+      drawBehavior.enabled = true
+      drawT = 1
+    }
+  }
+
+  onLevelChanged: {
+    if (!scrubbing) return
+    drawBehavior.enabled = false
+    drawT = Math.max(0.08, Math.max(0, Math.min(1, level)))
+  }
+
   onColorChanged: canvas.requestPaint()
-  onLevelChanged: canvas.requestPaint()
-  onScrubbingChanged: canvas.requestPaint()
+  onDrawTChanged: canvas.requestPaint()
   onWidthChanged: canvas.requestPaint()
   onHeightChanged: canvas.requestPaint()
 
@@ -47,8 +69,7 @@ Item {
       var level = Math.max(0, Math.min(1, root.level))
       if (root.scrubbing && Math.round(level * 100) <= 0)
         return
-      // Rest = full mark; scrub = volume, with a floor so 1% stays visible.
-      var t = root.scrubbing ? Math.max(0.08, level) : 1
+      var t = Math.max(0.08, Math.min(1, root.drawT))
       var s = Math.min(w, h) / 32
       var ww = 2.45 * s
       var hh = 7.0 * t * s

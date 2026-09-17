@@ -2,6 +2,7 @@
 """Stream stereo binaural beats (+ optional brown noise + rain bed) to PipeWire.
 
 Left ear is the carrier, right ear is carrier + beat. Headphones required.
+While tones play, noise/rain get subtle AM at the beat rate (synced bed).
 One pw-play stream (application.name=Binaural). Rain is mixed in-process from
 a decoded Moodist light-rain PCM loop — no mpv, no MPRIS.
 
@@ -11,6 +12,7 @@ Stdin commands (live mode):
     RAIN on|off
     TONES on|off
     PRESET <beat-hz>
+    CARRIER <hz>            # left = carrier, right = carrier + beat
     VOLUME <0-1 or 0-100>   # binaural tones only
     NOISEVOL <0-1 or 0-100>
     RAINVOL <0-1 or 0-100>
@@ -44,9 +46,8 @@ LOOKAHEAD_SEC = 0.02
 PIPE_BYTES = 4096
 F_SETPIPE_SZ = getattr(fcntl, "F_SETPIPE_SZ", 1031)
 
-# Gateway / Hemi-Sync carriers live in 100–200 Hz. 110 Hz (A2) is the
-# default; the plugin always passes it explicitly.
-DEFAULT_CARRIER = 110.0
+# Carrier band is 60–200 Hz; default/reset is 100.
+DEFAULT_CARRIER = 100.0
 
 # Tone level is constant whether a bed is on or not — the bed sits
 # underneath, it does not duck the beat.
@@ -58,6 +59,11 @@ NOISE_AMP = 0.25 * (10 ** (-4.0 / 20.0)) * (80 / 42)
 # stream as a bed under tones/noise; 0.50 keeps perceived level in the
 # same ballpark once rain_vol_gain and PLAY_VOLUME are applied.
 RAIN_AMP = 0.50
+# Subtle AM of noise/rain at the binaural beat rate (synced-bed /
+# soft-isochronic trick). Depth is peak deviation around 1.0 so the
+# bed pulses with the beat without swallowing it. Only while tones
+# are audible — no free-running pulse when beats are off.
+BED_BEAT_AM_DEPTH = 0.15
 TONE_FADE_IN_SEC = 0.04
 TONE_FADE_OUT_SEC = 0.04
 NOISE_RAMP_SEC = 0.05
@@ -164,9 +170,10 @@ def shrink_pipe(fd: int, size: int = PIPE_BYTES) -> None:
 
 def player_command() -> list[str] | None:
     if shutil.which("pw-play"):
-        # Omit --media-role Music so this is not treated as a media player /
-        # MPRIS candidate. Default role keeps a single Binaural stream in the
-        # Omarchy Audio panel only while we are actually writing PCM.
+        # pw-play defaults to --media-role Music; pin Event so WirePlumber
+        # does not treat this ambient generator like a media player / MPRIS
+        # candidate. Still shows as application.name=Binaural in the Audio panel
+        # while we are actually writing PCM.
         return [
             "pw-play",
             "--raw",
@@ -175,6 +182,7 @@ def player_command() -> list[str] | None:
             "--channels", str(CHANNELS),
             "--volume", PLAY_VOLUME,
             "--latency", "16ms",
+            "--media-role", "Event",
             "-P", "media.name=Binaural",
             "-P", "application.name=Binaural",
             "-",
@@ -293,6 +301,7 @@ class Engine:
         self.rng = LCG(seed)
         self.phase_l = 0.0
         self.phase_r = 0.0
+        self.phase_beat = 0.0
         self.brown_l = Brown()
         self.brown_r = Brown()
         self.rain_loop = RainLoop(rain_pcm or b"")
@@ -307,11 +316,19 @@ class Engine:
         right = max(20.0, self.carrier + self.beat)
         self.inc_l = TWO_PI * left / RATE
         self.inc_r = TWO_PI * right / RATE
+        self.inc_beat = TWO_PI * max(0.0, self.beat) / RATE
 
     def set_beat(self, beat: float) -> None:
         if not math.isfinite(beat) or beat <= 0:
             return
         self.beat = float(beat)
+        self._set_increments()
+
+    def set_carrier(self, carrier: float) -> None:
+        if not math.isfinite(carrier) or carrier <= 0:
+            return
+        # Keep both ears locked: left = carrier, right = carrier + beat.
+        self.carrier = float(carrier)
         self._set_increments()
 
     def set_noise(self, on: bool) -> None:
@@ -420,13 +437,24 @@ class Engine:
             left = sin(self.phase_l) * TONE_AMP * self.tone_gain * self.volume_gain
             right = sin(self.phase_r) * TONE_AMP * self.tone_gain * self.volume_gain
 
+            # Bed AM at exact beat Hz while tones are up — same LFO both ears
+            # so the pulse locks to the perceived binaural rate (not FM/ring).
+            bed_mod = 1.0
+            if self.tone_gain > 0.0001 and self.inc_beat > 0.0:
+                # Depth tracks tone amplitude volume — ducking the wave
+                # ducks the bed pulse toward 0.
+                bed_mod = 1.0 + (
+                    BED_BEAT_AM_DEPTH * self.tone_gain * self.volume_gain
+                    * sin(self.phase_beat)
+                )
+
             if self.noise_gain > 0.0001:
-                gain = NOISE_AMP * self.noise_gain * self.noise_vol_gain
+                gain = NOISE_AMP * self.noise_gain * self.noise_vol_gain * bed_mod
                 left += brown_l(rng()) * gain
                 right += brown_r(rng()) * gain
 
             if self.rain_gain > 0.0001:
-                gain = RAIN_AMP * self.rain_gain * self.rain_vol_gain
+                gain = RAIN_AMP * self.rain_gain * self.rain_vol_gain * bed_mod
                 rl, rr = rain_tick()
                 left += rl * gain
                 right += rr * gain
@@ -438,10 +466,13 @@ class Engine:
 
             self.phase_l += self.inc_l
             self.phase_r += self.inc_r
+            self.phase_beat += self.inc_beat
             if self.phase_l > TWO_PI * 16:
                 self.phase_l %= TWO_PI
             if self.phase_r > TWO_PI * 16:
                 self.phase_r %= TWO_PI
+            if self.phase_beat > TWO_PI * 16:
+                self.phase_beat %= TWO_PI
             self.frame += 1
 
         return buf.tobytes()
@@ -473,6 +504,12 @@ def apply_command(engine: Engine, line: str) -> None:
     if op == "PRESET" and len(parts) >= 2:
         try:
             engine.set_beat(float(parts[1]))
+        except ValueError:
+            return
+        return
+    if op == "CARRIER" and len(parts) >= 2:
+        try:
+            engine.set_carrier(float(parts[1]))
         except ValueError:
             return
         return

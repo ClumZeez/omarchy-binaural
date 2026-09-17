@@ -12,6 +12,10 @@ MouseArea {
   property real span: Style.space(96)
   property bool dragging: false
   property bool didMove: false
+  // True only once the pointer has actually scrubbed (or wheel).
+  // Plain tap/press must not drive logo morph — only grey↔color.
+  property bool wheelLive: false
+  readonly property bool valueScrubbing: (dragging && didMove) || wheelLive
   property real lastGlobalY: 0
   property real warpTargetY: -1
   property int idleCursor: Qt.PointingHandCursor
@@ -21,11 +25,20 @@ MouseArea {
 
   hoverEnabled: true
   preventStealing: true
-  acceptedButtons: Qt.LeftButton
+  acceptedButtons: root.resetGestures ? (Qt.LeftButton | Qt.RightButton) : Qt.LeftButton
   cursorShape: dragging || didMove ? Qt.SizeVerCursor : idleCursor
 
   signal scrubbed(real value)
   signal tapped()
+
+  Timer {
+    id: wheelLiveTimer
+    interval: 280
+    onTriggered: root.wheelLive = false
+  }
+  // Carrier scrub only: right-tap / double-click → resetRequested.
+  property bool resetGestures: false
+  signal resetRequested()
 
   function globalOf(lx, ly) {
     var p = mapToGlobal(lx, ly)
@@ -56,6 +69,13 @@ MouseArea {
   }
 
   onPressed: {
+    // Right button is reset-only when enabled; never scrub with it.
+    if (mouse.button === Qt.RightButton) {
+      if (!root.resetGestures) return
+      root.dragging = false
+      root.didMove = false
+      return
+    }
     root.dragging = true
     root.didMove = false
     root.warpTargetY = -1
@@ -98,11 +118,18 @@ MouseArea {
   }
 
   onReleased: {
+    var btn = mouse.button
     var wasDrag = root.didMove
     root.dragging = false
     root.didMove = false
     root.warpTargetY = -1
-    if (!wasDrag) root.tapped()
+    if (!wasDrag) root.wheelLive = false
+    if (wasDrag) return
+    if (btn === Qt.RightButton) {
+      if (root.resetGestures) root.resetRequested()
+      return
+    }
+    root.tapped()
   }
 
   onCanceled: {
@@ -111,8 +138,16 @@ MouseArea {
     root.warpTargetY = -1
   }
 
+  onDoubleClicked: {
+    if (!root.resetGestures) return
+    if (mouse.button !== Qt.LeftButton) return
+    root.resetRequested()
+  }
+
   onWheel: function(w) {
     var step = w.angleDelta.y > 0 ? 0.05 : -0.05
+    root.wheelLive = true
+    wheelLiveTimer.restart()
     root.scrubbed(Math.max(0, Math.min(1, root.value + step)))
   }
 }

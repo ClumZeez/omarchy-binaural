@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "callum.binaural",
   "name": "Binaural",
-  "version": "1.6.3",
+  "version": "1.8.0",
   "author": "Callum Lees",
   "license": "MIT",
   "description": "A minimal binaural beat suite, including options for brown noise or rain sounds with independent level controls",
@@ -22,7 +22,7 @@
     "defaultSection": "center",
     "allowMultiple": false,
     "defaults": {
-      "preset": "alpha",
+      "preset": "delta",
       "noise": true
     }
   }

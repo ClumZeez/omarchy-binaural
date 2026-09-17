@@ -24,7 +24,7 @@ Item {
   readonly property var entry: Beats.findEntry(shell ? shell.shellConfig : null, pluginId)
   readonly property var config: Beats.config(entry)
   readonly property var presets: Beats.PRESETS
-  readonly property real carrierHz: Beats.CARRIER_HZ
+  property real carrierHz: Beats.DEFAULT_CARRIER
 
   property string presetId: "alpha"
   property bool noise: false
@@ -33,8 +33,12 @@ Item {
   property bool noiseLive: false
   property bool rainLive: false
   property real volume: 1
+  // Last audible tone level before Space/click mute (never 50%-reset).
+  property real volumeSnap: 1
   property real noiseVolume: 1
+  property real noiseVolumeSnap: 1
   property real rainVolume: 1
+  property real rainVolumeSnap: 1
   property real masterVolume: 1
   property bool hydrated: false
   // Moodist light-rain.mp3 — decoded once by the generator to PCM cache.
@@ -64,6 +68,7 @@ Item {
     current.noiseVolume = noiseVolume
     current.rainVolume = rainVolume
     current.masterVolume = masterVolume
+    current.carrier = carrierHz
     if (shell && typeof shell.updateEntryInline === "function")
       shell.updateEntryInline(pluginId, current)
   }
@@ -79,9 +84,13 @@ Item {
     noise = config.noise
     rain = config.rain
     volume = config.volume
+    volumeSnap = volume > 0.001 ? volume : 1
     noiseVolume = config.noiseVolume
+    noiseVolumeSnap = noiseVolume > 0.001 ? noiseVolume : 1
     rainVolume = config.rainVolume
+    rainVolumeSnap = rainVolume > 0.001 ? rainVolume : 1
     masterVolume = config.masterVolume
+    carrierHz = config.carrier
     // Do not warm-start the generator — no stream until something sounds.
   }
 
@@ -234,8 +243,15 @@ Item {
     schedulePersist()
   }
 
+  // Space/tap: on/off only. Level stays put (restore snap only if it was 0%).
   function toggleNoise() {
-    setNoise(!noiseLive)
+    if (noiseLive) {
+      setNoise(false)
+      return
+    }
+    if (noiseVolume <= 0.001)
+      setNoiseVolume(noiseVolumeSnap > 0.001 ? noiseVolumeSnap : 1)
+    setNoise(true)
   }
 
   function toneGain() {
@@ -257,12 +273,43 @@ Item {
   }
 
   // Oscilloscope: tones only (still scaled by masterVolume).
+  // Drag / Shift-nudge implies intent to hear it — arm tones.
   function setVolume(value) {
     var next = Beats.clampVolume(value, volume)
     if (Math.abs(next - volume) < 0.001) return
     volume = next
+    if (next > 0.001) volumeSnap = next
     schedulePersist()
     tell("VOLUME " + toneGain() + "\n")
+    // 0% means off — stop tones; any audible level arms them.
+    if (next <= 0.001) stopTones()
+    else ensureTonesPlaying()
+  }
+
+  // Space / tap on carrier or amplitude: tones on/off. Level/Hz unchanged.
+  // On starts last preset, or Delta on first run.
+  function toggleTones() {
+    if (playing) {
+      stopTones()
+      return
+    }
+    ensureTonesPlaying()
+  }
+
+  function ensureTonesPlaying() {
+    if (playing) return
+    startPlayer(presetId)
+  }
+
+  // Hero sine scrub: carrier Hz (both ears move; beat offset unchanged).
+  // Drag / Shift-nudge arms tones.
+  function setCarrier(hz) {
+    var next = Beats.clampCarrier(hz, carrierHz)
+    if (Math.abs(next - carrierHz) < 0.01) return
+    carrierHz = next
+    schedulePersist()
+    tell("CARRIER " + carrierHz + "\n")
+    ensureTonesPlaying()
   }
 
   // IPC volume: master gain over tones + noise + rain.
@@ -274,14 +321,15 @@ Item {
     applyAllVolumes()
   }
 
+  // Drag / Shift-nudge sets level and arms the bed (Space still toggles off).
   function setNoiseVolume(value) {
     var next = Beats.clampVolume(value, noiseVolume)
-    if (Math.abs(next - noiseVolume) >= 0.001) {
-      noiseVolume = next
-      schedulePersist()
-      tell("NOISEVOL " + noiseGain() + "\n")
-    }
-    // 0% disables the bed; any audible level arms it.
+    if (Math.abs(next - noiseVolume) < 0.001) return
+    noiseVolume = next
+    if (next > 0.001) noiseVolumeSnap = next
+    schedulePersist()
+    tell("NOISEVOL " + noiseGain() + "\n")
+    // 0% deactivates; any audible level arms.
     if (next <= 0.001) {
       if (noiseLive) setNoise(false)
     } else if (!noiseLive) {
@@ -291,12 +339,11 @@ Item {
 
   function setRainVolume(value) {
     var next = Beats.clampVolume(value, rainVolume)
-    if (Math.abs(next - rainVolume) >= 0.001) {
-      rainVolume = next
-      schedulePersist()
-      tell("RAINVOL " + rainGain() + "\n")
-    }
-    // 0% disables the bed; any audible level arms it.
+    if (Math.abs(next - rainVolume) < 0.001) return
+    rainVolume = next
+    if (next > 0.001) rainVolumeSnap = next
+    schedulePersist()
+    tell("RAINVOL " + rainGain() + "\n")
     if (next <= 0.001) {
       if (rainLive) setRain(false)
     } else if (!rainLive) {
@@ -312,7 +359,13 @@ Item {
   }
 
   function toggleRain() {
-    setRain(!rainLive)
+    if (rainLive) {
+      setRain(false)
+      return
+    }
+    if (rainVolume <= 0.001)
+      setRainVolume(rainVolumeSnap > 0.001 ? rainVolumeSnap : 1)
+    setRain(true)
   }
 
   function statusJson() {
@@ -352,6 +405,7 @@ Item {
       player.write("VOLUME " + root.toneGain() + "\n")
       player.write("NOISEVOL " + root.noiseGain() + "\n")
       player.write("RAINVOL " + root.rainGain() + "\n")
+      player.write("CARRIER " + root.carrierHz + "\n")
       player.write("NOISE " + (root.noiseLive ? "on" : "off") + "\n")
       player.write("RAIN " + (root.rainLive ? "on" : "off") + "\n")
       if (root.playing) {
@@ -396,6 +450,12 @@ Item {
     function volume(value: string): string {
       if (value !== undefined && value !== null && String(value).length)
         root.setMasterVolume(value)
+      return root.statusJson()
+    }
+    // Carrier Hz (Hemi-Sync band); both ears move, beat offset unchanged.
+    function carrier(value: string): string {
+      if (value !== undefined && value !== null && String(value).length)
+        root.setCarrier(value)
       return root.statusJson()
     }
   }

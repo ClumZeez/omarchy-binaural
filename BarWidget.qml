@@ -28,6 +28,8 @@ BarWidget {
   readonly property real volume: ready ? beats.volume : 1
   readonly property real noiseVolume: ready ? beats.noiseVolume : 1
   readonly property real rainVolume: ready ? beats.rainVolume : 1
+  readonly property real carrierHz: ready ? beats.carrierHz : Beats.DEFAULT_CARRIER
+  readonly property real carrierLevel: Beats.levelFromCarrier(carrierHz)
   readonly property real beatHz: ready ? beats.beatHz : 10
   readonly property string presetName: ready ? beats.presetName : "Binaural"
   readonly property string effect: ready ? beats.effect : ""
@@ -55,19 +57,40 @@ BarWidget {
 
   property bool popupOpen: false
 
-  // Keyboard cursor inside the popup. Beds sit on row -1; presets are a 2×3 grid.
+  // Keyboard cursor. Header row (-1): carrier | volume | noise | rain.
+  // Preset rows 0–2: 2-column grid. Focus rings only while keyboardNavActive.
+  // Shift+Up/Down nudges the focused header control (Hz / %).
   property int cursorRow: 0
   property int cursorCol: 0
+  property bool keyboardNavActive: false
+  // True briefly while Shift-nudging so icons match drag scrub visuals.
+  property bool nudgeFlash: false
+
+  readonly property int headerCols: 4
+  readonly property int presetCols: 2
+  readonly property real volumeStep: 0.01
+  readonly property real carrierStep: 1
+  readonly property int headerIconH: Style.space(44)
+  readonly property int headerValueH: Style.font.caption + Style.space(4)
 
   readonly property bool opened: popupOpen
   function open() {
     popupOpen = true
+    keyboardNavActive = false
     resetCursor()
   }
-  function close() { popupOpen = false }
+  function close() {
+    popupOpen = false
+    keyboardNavActive = false
+  }
   function togglePanel() {
     popupOpen = !popupOpen
-    if (popupOpen) resetCursor()
+    if (popupOpen) {
+      keyboardNavActive = false
+      resetCursor()
+    } else {
+      keyboardNavActive = false
+    }
   }
 
   function presetAt(row, col) {
@@ -93,10 +116,70 @@ BarWidget {
     cursorCol = 0
   }
 
+  function focusPreset(id) {
+    keyboardNavActive = false
+    var list = root.presets
+    if (!Array.isArray(list)) return
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].id === id) {
+        cursorRow = Math.floor(i / 2)
+        cursorCol = i % 2
+        return
+      }
+    }
+  }
+
+  function focusBed(which) {
+    keyboardNavActive = false
+    cursorRow = -1
+    cursorCol = (String(which) === "rain") ? 3 : 2
+  }
+
+  function focusHeader(which) {
+    keyboardNavActive = false
+    cursorRow = -1
+    var w = String(which || "")
+    if (w === "carrier") cursorCol = 0
+    else if (w === "volume") cursorCol = 1
+    else if (w === "rain") cursorCol = 3
+    else cursorCol = 2
+  }
+
+  function headerColMax() { return root.headerCols - 1 }
+
   function moveCursor(dx, dy) {
-    var row = cursorRow + dy
-    var col = cursorCol + dx
-    if (row < -1) row = -1
+    keyboardNavActive = true
+    var row = cursorRow
+    var col = cursorCol
+
+    if (row < 0) {
+      // Header strip.
+      if (dy > 0) {
+        // Down into presets: carrier/volume → left col, noise/rain → right.
+        cursorRow = 0
+        cursorCol = col >= 2 ? 1 : 0
+        return
+      }
+      if (dy < 0)
+        return
+      col = col + dx
+      if (col < 0) col = 0
+      if (col > headerColMax()) col = headerColMax()
+      cursorCol = col
+      return
+    }
+
+    // Preset grid.
+    if (dy < 0 && row === 0) {
+      cursorRow = -1
+      // Left preset col → carrier; right → noise (skip volume unless coming from right via left).
+      cursorCol = col === 0 ? 0 : 2
+      return
+    }
+
+    row = row + dy
+    col = col + dx
+    if (row < 0) row = 0
     if (row > 2) row = 2
     if (col < 0) col = 0
     if (col > 1) col = 1
@@ -104,19 +187,49 @@ BarWidget {
     cursorCol = col
   }
 
-  function cursorOnNoise() { return cursorRow < 0 && cursorCol === 0 }
-  function cursorOnRain() { return cursorRow < 0 && cursorCol === 1 }
+  function cursorOnCarrier() { return cursorRow < 0 && cursorCol === 0 }
+  function cursorOnVolume() { return cursorRow < 0 && cursorCol === 1 }
+  function cursorOnNoise() { return cursorRow < 0 && cursorCol === 2 }
+  function cursorOnRain() { return cursorRow < 0 && cursorCol === 3 }
   function cursorOnPreset(id) {
     if (cursorRow < 0) return false
     var p = presetAt(cursorRow, cursorCol)
     return !!(p && p.id === id)
   }
 
+  function nudgeFocused(dir) {
+    if (!root.ready) return
+    keyboardNavActive = true
+    nudgeFlash = true
+    nudgeFlashTimer.restart()
+    var d = dir >= 0 ? 1 : -1
+    if (cursorRow >= 0) return
+    if (cursorOnCarrier()) {
+      root.beats.setCarrier(root.carrierHz + d * root.carrierStep)
+      return
+    }
+    if (cursorOnVolume()) {
+      root.beats.setVolume(Math.max(0, Math.min(1, root.volume + d * root.volumeStep)))
+      return
+    }
+    if (cursorOnNoise()) {
+      root.beats.setNoiseVolume(Math.max(0, Math.min(1, root.noiseVolume + d * root.volumeStep)))
+      return
+    }
+    if (cursorOnRain()) {
+      root.beats.setRainVolume(Math.max(0, Math.min(1, root.rainVolume + d * root.volumeStep)))
+    }
+  }
+
   function activateCursor() {
     if (!root.ready) return
+    keyboardNavActive = true
     if (cursorRow < 0) {
-      if (cursorCol === 0) root.beats.toggleNoise()
-      else root.beats.toggleRain()
+      // Header: Space is on/off only — levels move via drag / Shift+Up/Down.
+      if (cursorOnCarrier()) { root.beats.toggleTones(); return }
+      if (cursorOnVolume()) { root.beats.toggleTones(); return }
+      if (cursorOnNoise()) { root.beats.toggleNoise(); return }
+      if (cursorOnRain()) { root.beats.toggleRain(); return }
       return
     }
     var p = presetAt(cursorRow, cursorCol)
@@ -125,6 +238,12 @@ BarWidget {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  Timer {
+    id: nudgeFlashTimer
+    interval: 120
+    onTriggered: root.nudgeFlash = false
+  }
 
   IpcHandler {
     target: "callum.binaural"
@@ -140,12 +259,14 @@ BarWidget {
     property var preset: ({})
     readonly property bool selected: root.playing && preset && preset.id === root.presetId
     readonly property bool hot: tileMouse.containsMouse
-    readonly property bool hasCursor: preset && root.cursorOnPreset(preset.id)
+    readonly property bool hasCursor: root.keyboardNavActive && preset && root.cursorOnPreset(preset.id)
     // Theme selected-border-width defaults to 0; force a 1px box so the
     // grid seams stay visible (and so a selected fill edge cannot stand
     // in for a neighbor's missing left border).
     readonly property var tileBorderSpec: {
-      var state = selected ? "selected" : (hasCursor ? "focus" : (hot ? "hover-cursor" : "normal"))
+      // Focus ring must win over selected fill — otherwise the playing preset
+      // looks unfocused while the keyboard is parked on it.
+      var state = hasCursor ? "focus" : (selected ? "selected" : (hot ? "hover-cursor" : "normal"))
       var spec = Border.controlSpec(state, root.fg, root.accent)
       var w = Math.max(Border.left(spec), Border.right(spec), Border.top(spec), Border.bottom(spec), Border.uniformWidth(spec))
       if (w <= 0)
@@ -156,9 +277,11 @@ BarWidget {
     implicitHeight: Style.space(76)
     radius: Style.cornerRadius
     // Do not clip — BorderOverlay AA sits on the edge and clip eats it.
-    color: selected
-      ? Style.selectedFillFor(root.fg, root.accent)
-      : Style.controlFill(hasCursor, hot, root.fg, root.accent)
+    color: hasCursor
+      ? Style.focusFillFor(root.fg, root.accent)
+      : (selected
+        ? Style.selectedFillFor(root.fg, root.accent)
+        : Style.controlFill(false, hot, root.fg, root.accent))
     borderSpec: tileBorderSpec
 
     Behavior on color { ColorAnimation { duration: 100 } }
@@ -226,7 +349,11 @@ BarWidget {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: if (root.ready && tile.preset && tile.preset.id) root.beats.play(tile.preset.id)
+      onClicked: {
+        if (!root.ready || !tile.preset || !tile.preset.id) return
+        root.focusPreset(tile.preset.id)
+        root.beats.play(tile.preset.id)
+      }
     }
   }
 
@@ -244,11 +371,11 @@ BarWidget {
     tooltipText: root.tooltip
     horizontalMargin: 8.75
     verticalPadding: 8.75
-    // Keep playing-chip width stable across presets so the popup anchor
-    // does not drift when switching Delta↔SMR↔Gamma (SMR is shortest).
+    // Name only when playing with the popup closed — keeps the chip compact
+    // while the popup is open so toggling presets cannot slide the anchor.
     fixedWidth: {
       if (root.vertical) return -1
-      if (root.playing) {
+      if (root.playing && !root.popupOpen) {
         return Math.ceil(
           Style.bar.iconCanvas + Style.space(6) + longestPresetLabel.implicitWidth
           + Style.spaceReal(8.75) * 2
@@ -290,11 +417,12 @@ BarWidget {
       SineIcon {
         iconSize: Style.bar.iconCanvas
         color: root.iconColor
+        restLevel: Beats.levelFromCarrier(Beats.DEFAULT_CARRIER)
         anchors.verticalCenter: parent.verticalCenter
       }
 
       Text {
-        visible: root.playing && !root.vertical
+        visible: root.playing && !root.popupOpen && !root.vertical
         textFormat: Text.PlainText
         text: root.presetName
         color: root.iconColor
@@ -317,11 +445,12 @@ BarWidget {
     contentWidth: popup.fittedContentWidth(Style.space(456))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
 
-    PanelKeyCatcher {
+    BinauralKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onNudgeRequested: function(dir) { root.nudgeFocused(dir) }
       onActivateRequested: root.activateCursor()
 
     Column {
@@ -330,22 +459,112 @@ BarWidget {
       spacing: Style.space(12)
 
       Item {
+        id: headerRow
         width: parent.width
-        height: Math.max(heroIcon.height, heroCopy.height, floorControls.height)
+        height: root.headerIconH + root.headerValueH
 
-        SineIcon {
+        Item {
           id: heroIcon
           anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-          iconSize: Style.font.display
-          color: root.playing ? root.accent : root.fg
+          anchors.top: parent.top
+          // Width follows the icon only — Hz text uses a fixed slot so
+          // 99→100 Hz cannot shove amplitude / beds sideways.
+          width: heroSine.width
+          height: root.headerIconH + root.headerValueH
+
+          BorderSurface {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: Math.max(0, Math.round((root.headerIconH - heroSine.height - Style.space(10)) / 2))
+            width: Math.ceil(heroSine.width + Style.space(10))
+            height: Math.ceil(heroSine.height + Style.space(10))
+            radius: Math.min(Style.cornerRadius, Math.floor(height / 2))
+            color: root.keyboardNavActive && root.cursorOnCarrier()
+              ? Style.focusFillFor(root.fg, root.accent) : "transparent"
+            borderSpec: root.keyboardNavActive && root.cursorOnCarrier()
+              ? Border.controlSpec("focus", root.fg, root.accent)
+              : Border.controlSpec("normal", root.fg, root.accent)
+            opacity: root.keyboardNavActive && root.cursorOnCarrier() ? 1 : 0
+            z: 0
+            Behavior on opacity { NumberAnimation { duration: 100 } }
+          }
+
+          SineIcon {
+            id: heroSine
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: Math.max(0, Math.round((root.headerIconH - height) / 2))
+            z: 1
+            iconSize: Style.font.display
+            // Grey when tones off — focus ring stays separate.
+            color: root.playing ? root.accent : root.fg
+            level: root.carrierLevel
+            restLevel: Beats.levelFromCarrier(Beats.DEFAULT_CARRIER)
+            scrubbing: carrierScrub.valueScrubbing
+              || (root.nudgeFlash && root.keyboardNavActive && root.cursorOnCarrier())
+          }
+
+          // Metrics for the widest Hz label in-band (200 Hz).
+          Text {
+            id: carrierHzMetrics
+            visible: false
+            textFormat: Text.PlainText
+            text: "200 Hz"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          Text {
+            id: carrierValue
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: root.headerIconH
+            width: carrierHzMetrics.implicitWidth
+            horizontalAlignment: Text.AlignHCenter
+            textFormat: Text.PlainText
+            text: Math.round(root.carrierHz) + " Hz"
+            color: root.playing ? root.accent : root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            opacity: carrierScrub.valueScrubbing || carrierScrub.containsMouse
+              || (root.keyboardNavActive && root.cursorOnCarrier()) ? 1 : 0
+            z: 2
+            Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+          }
+
+          VertScrub {
+            id: carrierScrub
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            width: Math.max(heroSine.width, Style.space(44))
+            height: root.headerIconH
+            value: root.carrierLevel
+            resetGestures: true
+            onScrubbed: function(v) {
+              root.focusHeader("carrier")
+              if (root.ready) root.beats.setCarrier(Beats.carrierFromLevel(v))
+            }
+            // Tap / Space: tones on/off (not a value change).
+            onTapped: {
+              root.focusHeader("carrier")
+              if (root.ready) root.beats.toggleTones()
+            }
+            // Double-click or right-click → default carrier (100 Hz).
+            onResetRequested: {
+              root.focusHeader("carrier")
+              if (root.ready) root.beats.setCarrier(Beats.DEFAULT_CARRIER)
+            }
+          }
         }
 
         Column {
           id: heroCopy
           anchors.left: heroIcon.right
           anchors.leftMargin: Style.space(14)
-          anchors.verticalCenter: parent.verticalCenter
+          anchors.top: parent.top
+          anchors.topMargin: Math.max(0, Math.round((root.headerIconH - height) / 2))
           spacing: Style.space(2)
           width: Math.max(titleLine.width, heroMeta.implicitWidth)
 
@@ -419,43 +638,67 @@ BarWidget {
           anchors.leftMargin: Style.space(10)
           anchors.right: floorControls.left
           anchors.rightMargin: Style.space(4)
-          anchors.verticalCenter: parent.verticalCenter
-          height: parent.height
+          anchors.top: parent.top
+          iconBand: root.headerIconH
+          valueBand: root.headerValueH
           volume: root.volume
+          hasCursor: root.keyboardNavActive && root.cursorOnVolume()
+          nudging: root.nudgeFlash && root.keyboardNavActive && root.cursorOnVolume()
           // Wave runs only while a preset is actually playing — beds alone
           // must not look like a selected beat.
           active: root.playing
           hz: root.playing ? root.beatHz : 10
           color: root.accent
-          idleColor: Qt.darker(root.fg, 1.35)
+          idleColor: root.fg
           fontFamily: root.fontFamily
-          onMoved: function(v) { if (root.ready) root.beats.setVolume(v) }
+          onMoved: function(v) {
+            root.focusHeader("volume")
+            if (root.ready) root.beats.setVolume(v)
+          }
+          onActivated: {
+            root.focusHeader("volume")
+            if (root.ready) root.beats.toggleTones()
+          }
         }
 
         Row {
           id: floorControls
           anchors.right: parent.right
           anchors.rightMargin: Style.space(4)
-          anchors.verticalCenter: parent.verticalCenter
+          anchors.top: parent.top
           spacing: Style.space(7)
 
           FloorButton {
             on: root.noiseLive
-            hasCursor: root.cursorOnNoise()
+            hasCursor: root.keyboardNavActive && root.cursorOnNoise()
+            bed: "noise"
             tip: "Noise"
             volume: root.noiseVolume
             glyph: noiseGlyph
-            onActivated: if (root.ready) root.beats.toggleNoise()
-            onVolumeMoved: function(v) { if (root.ready) root.beats.setNoiseVolume(v) }
+            onActivated: {
+              root.focusBed("noise")
+              if (root.ready) root.beats.toggleNoise()
+            }
+            onVolumeMoved: function(v) {
+              root.focusBed("noise")
+              if (root.ready) root.beats.setNoiseVolume(v)
+            }
           }
           FloorButton {
             on: root.rainLive
-            hasCursor: root.cursorOnRain()
+            hasCursor: root.keyboardNavActive && root.cursorOnRain()
+            bed: "rain"
             tip: "Rain"
             volume: root.rainVolume
             glyph: rainGlyph
-            onActivated: if (root.ready) root.beats.toggleRain()
-            onVolumeMoved: function(v) { if (root.ready) root.beats.setRainVolume(v) }
+            onActivated: {
+              root.focusBed("rain")
+              if (root.ready) root.beats.toggleRain()
+            }
+            onVolumeMoved: function(v) {
+              root.focusBed("rain")
+              if (root.ready) root.beats.setRainVolume(v)
+            }
           }
         }
       }
@@ -506,20 +749,23 @@ BarWidget {
     property bool on: false
     property bool hasCursor: false
     property string tip: ""
+    property string bed: ""
     property real volume: 1
     property Component glyph: null
     signal activated()
     signal volumeMoved(real volume)
 
-    implicitWidth: glyphLoader.item ? Math.ceil(glyphLoader.item.width) : Style.font.display
-    implicitHeight: Style.space(44)
+    implicitWidth: Math.max(
+      glyphLoader.item ? Math.ceil(glyphLoader.item.width) : Style.font.display,
+      valueLabel.implicitWidth
+    )
+    implicitHeight: root.headerIconH + root.headerValueH
 
-    readonly property bool hot: scrub.containsMouse || scrub.dragging
+    readonly property bool hot: scrub.containsMouse || scrub.valueScrubbing
+    readonly property bool showValue: hot || hasCursor || scrub.valueScrubbing
+    // Grey only when off — level is independent (Shift/drag). Focus ring separate.
     readonly property color glyphColor: {
-      // Keyboard cursor wins; else off/0% is inactive; on is accent (lighter while hot).
-      if (floor.hasCursor)
-        return root.accent
-      if (!floor.on || floor.volume <= 0.001)
+      if (!floor.on)
         return root.fg
       if (floor.hot)
         return Qt.lighter(root.accent, 1.18)
@@ -527,7 +773,9 @@ BarWidget {
     }
 
     BorderSurface {
-      anchors.centerIn: parent
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.top: parent.top
+      anchors.topMargin: Math.max(0, Math.round((root.headerIconH - height) / 2))
       width: Math.ceil((glyphLoader.item ? glyphLoader.item.width : Style.font.display) + Style.space(10))
       height: Math.ceil(Style.font.display + Style.space(10))
       radius: Math.min(Style.cornerRadius, Math.floor(height / 2))
@@ -542,7 +790,9 @@ BarWidget {
 
     Loader {
       id: glyphLoader
-      anchors.centerIn: parent
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.top: parent.top
+      anchors.topMargin: Math.max(0, Math.round((root.headerIconH - (item ? item.height : Style.font.display)) / 2))
       z: 1
       sourceComponent: floor.glyph
       onLoaded: {
@@ -552,19 +802,24 @@ BarWidget {
         if (item.level !== undefined)
           item.level = Qt.binding(function() { return floor.volume })
         if (item.scrubbing !== undefined)
-          item.scrubbing = Qt.binding(function() { return scrub.dragging })
+          item.scrubbing = Qt.binding(function() {
+            return scrub.valueScrubbing || (floor.hasCursor && root.nudgeFlash)
+          })
       }
     }
 
     Text {
-      anchors.centerIn: parent
+      id: valueLabel
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.top: parent.top
+      anchors.topMargin: root.headerIconH
       textFormat: Text.PlainText
       text: Math.round(floor.volume * 100) + "%"
       color: floor.glyphColor
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
-      opacity: scrub.dragging ? 1 : 0
+      opacity: floor.showValue ? 1 : 0
       z: 2
 
       Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
@@ -572,16 +827,17 @@ BarWidget {
 
     VertScrub {
       id: scrub
-      anchors.fill: parent
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.top: parent.top
+      width: parent.width
+      height: root.headerIconH
       value: floor.volume
       onScrubbed: function(v) { floor.volumeMoved(v) }
-      onTapped: {
-        // Click at 0% restores a usable level; a drag from 0% stays at 0%.
-        if (floor.volume <= 0.001)
-          floor.volumeMoved(0.5)
-        else
-          floor.activated()
+      onDraggingChanged: {
+        if (scrub.dragging && floor.bed)
+          root.focusBed(floor.bed)
       }
+      onTapped: floor.activated()
     }
 
     PanelToolTip {

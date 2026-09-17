@@ -3,6 +3,8 @@ import qs.Commons
 
 // Single-trace scope: y = sin(2π (x·cycles + phase)) · level.
 // `level` 0 is a flat line; 1 is the full tile amplitude.
+// Side fades go fully transparent before the outermost pixels so round
+// caps / AA do not leave a hard fringe on the right (or left).
 Item {
   id: root
 
@@ -49,25 +51,33 @@ Item {
 
       var mid = h / 2
       var amp = h * 0.34 * Math.max(0, Math.min(1, root.level))
+      var lw = Math.max(1.25, h * 0.07)
+      // Keep round caps inside the fade zone so they can dissolve fully.
+      var inset = lw * 0.5 + 1
       var n = Math.max(32, Math.floor(w))
       ctx.beginPath()
       ctx.lineCap = "round"
       ctx.lineJoin = "round"
-      ctx.lineWidth = Math.max(1.25, h * 0.07)
+      ctx.lineWidth = lw
       ctx.strokeStyle = root.color
       for (var i = 0; i <= n; i++) {
         var t = i / n
+        var x = inset + t * (w - 2 * inset)
         var y = mid + Math.sin((t * root.cycles + root.phase) * Math.PI * 2) * amp
-        if (i === 0) ctx.moveTo(t * w, y)
-        else ctx.lineTo(t * w, y)
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
       }
       ctx.stroke()
 
       ctx.globalCompositeOperation = "destination-in"
       var fade = ctx.createLinearGradient(0, 0, w, 0)
+      // Hold full transparent at both extremes so the furthermost pixels
+      // are truly clear (avoids a residual fringe on the right edge).
       fade.addColorStop(0.00, "rgba(0,0,0,0)")
-      fade.addColorStop(0.16, "rgba(0,0,0,1)")
-      fade.addColorStop(0.84, "rgba(0,0,0,1)")
+      fade.addColorStop(0.04, "rgba(0,0,0,0)")
+      fade.addColorStop(0.18, "rgba(0,0,0,1)")
+      fade.addColorStop(0.82, "rgba(0,0,0,1)")
+      fade.addColorStop(0.96, "rgba(0,0,0,0)")
       fade.addColorStop(1.00, "rgba(0,0,0,0)")
       ctx.fillStyle = fade
       ctx.fillRect(0, 0, w, h)

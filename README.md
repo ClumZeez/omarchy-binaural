@@ -5,7 +5,7 @@
 A minimal binaural beat suite, including options for brown noise or rain sounds with independent level controls.
 
 Headphones are required: a binaural beat is the difference between the two
-ears. The carrier is **110 Hz**.
+ears. The carrier defaults to **100 Hz** (scrub the hero sine for **60–200 Hz**; double-click or right-click resets to 100).
 
 ## Presets
 
@@ -21,7 +21,9 @@ ears. The carrier is **110 Hz**.
 ## The popup
 
 Noise and rain icons sit on the top-right, binaural beat control is the oscilloscope in the middle:
-click to mute/unmute, drag to change volume.
+click to mute/unmute, drag to change volume. Drag the hero sine (top-left) to change
+**carrier Hz** (60–200); the icon animates while scrubbing and snaps back to the rest
+mark on release. Pointer clicks sync the keyboard highlight to that control.
 
 Brown noise is generated in-process; rain is Moodist's **Light Rain** sample
 decoded once to PCM and mixed in the same stream (see `THIRD_PARTY.md`).
@@ -76,9 +78,12 @@ With the popup open:
 
 | Key | Action |
 |---|---|
-| Arrow keys (or `h` `j` `k` `l`) | Move focus across noise, rain, and the six presets |
-| Enter / Space | Toggle the focused preset or bed |
+| Arrow keys (or `h` `j` `k` `l`) | Move focus across carrier, amplitude, noise, rain, and the six presets |
+| Shift+Up / Shift+Down (or Shift+K / Shift+J) | Nudge focused header control (carrier ±1 Hz, volumes ±1%; hold to ramp) |
+| Enter / Space | On/off for focused header control (tones / amplitude / noise / rain); play/toggle preset |
 | Esc | Close the popup |
+
+Pointer clicks (preset / noise / rain) move the keyboard cursor to that control, but the focus ring only appears after you use the arrow keys (pointer use hides it).
 
 No global Hyprland binds — keyboard control only works while the popup is open.
 
@@ -92,6 +97,7 @@ omarchy-shell binaural toggle         # mute all / restore (same as bar right-cl
 omarchy-shell binaural noise          # toggle noise
 omarchy-shell binaural rain           # toggle rain
 omarchy-shell binaural volume 0.5     # master gain over tones + noise + rain
+omarchy-shell binaural carrier 150    # carrier Hz (60–200); beat offset unchanged
 omarchy-shell shell toggle callum.binaural   # open / close the popup
 ```
 
@@ -106,15 +112,17 @@ Per-bed levels stay in the popup (oscilloscope / noise / rain scrubs).
 - Exactly one PipeWire stream: `application.name=Binaural` /
   `media.name=Binaural` via `pw-play`. No `BinauralRain`, no MPRIS.
 - `BarWidget.qml` is the bar label and the popup, one per monitor.
-- `SineIcon.qml` tints `assets/SineWave.svg` for the bar and the hero.
+- `SineIcon.qml` tints `assets/SineWave.svg` at rest; while carrier-scrubbing it
+  paints a canvas sine whose wavelength tracks Hz.
 - `NoiseIcon.qml` / `RainIcon.qml` draw canvas marks (size follows volume
   while scrubbing).
 - `VolumeScope.qml` / `Oscilloscope.qml` are the tone-volume control.
 - `Beats.js` is the preset table and config parsing.
-- `binaural` is a small Python generator. Left = 110 Hz, right = 110 Hz +
-  beat. Optional uncorrelated brown noise in each ear. Rain PCM loop mixed
-  the same way. Fade in on start, fade out on stop. Live `PRESET` / `NOISE` /
-  `RAIN` / `NOISEVOL` / `RAINVOL` / `VOLUME` / `TONES` / `STOP` on stdin.
+- `binaural` is a small Python generator. Left = carrier, right = carrier +
+  beat (default carrier 100 Hz). Optional uncorrelated brown noise in each ear. While tones are on, both beds get subtle amplitude modulation locked to the beat frequency.
+  Rain PCM loop mixed the same way. Fade in on start, fade out on stop. Live
+  `PRESET` / `CARRIER` / `NOISE` / `RAIN` / `NOISEVOL` / `RAINVOL` / `VOLUME` /
+  `TONES` / `STOP` on stdin.
 - `assets/light-rain.mp3` is the rain bed (Moodist; see `THIRD_PARTY.md`).
 
 ## License
